@@ -1,0 +1,5 @@
+
+python-chess
+matplotlib
+# If you use SQLite or another DB, add the driver (e.g., sqlite3 is built-in)
+# Add any other dependencies your 'database.py' or other modules require
