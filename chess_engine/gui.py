@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import matplotlib
 import numpy as np
 from .analyzer import ChessAnalyzer
+from .mistake_analyzer import get_piece_counts, get_piece_count_differences
 from typing import Optional, List
 
 matplotlib.use('TkAgg')  # Use Tkinter backend
@@ -847,8 +848,8 @@ class ChessGui(tk.Tk):
         if not mistake_analysis:
             return
         
-        # Create interactive board window for this mistake
-        board_window = MistakeBoardWindow(self, mistake_analysis)
+        # Use MistakeBoardWindow with two boards (mistake vs best alternative)
+        board_window = MistakeBoardWindow(self, mistake_analysis, engine=None)
         board_window.mainloop()
 
 
@@ -1012,7 +1013,8 @@ class MistakeExplorerWindow(tk.Toplevel):
         """Open interactive board window for current mistake."""
         if self.current_mistake_index < len(self.mistake_analyses):
             mistake = self.mistake_analyses[self.current_mistake_index]
-            board_window = MistakeBoardWindow(self, mistake)
+            # Use MistakeBoardWindow with two boards (mistake vs best alternative)
+            board_window = MistakeBoardWindow(self, mistake, engine=None)
             board_window.mainloop()
     
     def display_mistake(self, index):
@@ -1104,15 +1106,28 @@ class MistakeExplorerWindow(tk.Toplevel):
 class MistakeBoardWindow(tk.Toplevel):
     """Interactive window to view a mistake with two boards: why it's a mistake vs best alternative."""
     
-    def __init__(self, parent, mistake_analysis):
+    def __init__(self, parent, mistake_analysis, engine=None):
         super().__init__(parent)
         self.mistake_analysis = mistake_analysis
         self.current_continuation_index = 0  # For left board (why it's a mistake)
         self.current_best_variation_index = 0  # For right board (best alternative)
+        self.current_pv_analysis = None  # Store current PV analysis for debug display
+        self.pv_analysis_log = []  # Accumulate analysis for ALL PV moves
+        self.engine = engine  # Engine for calculating evals
+        self.position_after_mistake = None  # Store position after White's mistake (move 0.5) for comparison
+        self.significant_issue_found = False  # Track if we found a significant issue (stop PV)
+        self.significant_issue_move = None  # Store the move number where significant issue was found
+        self.showing_white_move = False  # Track if we're currently showing White's move (waiting for Black's move to auto-show)
+        self.pending_black_move_index = None  # Store the index of Black's move to show after delay
+        self.pv_evals = {}  # Store calculated evals for PV positions: {(side, move_index): eval}
+        self.best_pv_evals = {}  # Store calculated evals for best alternative PV positions
+        self.engine_created_here = False  # Track if we created the engine (need to close it)
         
         self.title("Interactive Mistake Analysis")
-        self.geometry("1400x850")
+        self.geometry("1900x1100")  # Taller to ensure buttons are visible
         self.configure(bg="#2C3E50")
+        # Make window resizable
+        self.minsize(1600, 900)
         
         self.colors = {
             "light": "#F0D9B5",
@@ -1130,9 +1145,14 @@ class MistakeBoardWindow(tk.Toplevel):
             'p': '♟', 'n': '♞', 'b': '♝', 'r': '♜', 'q': '♛', 'k': '♚'
         }
         
-        self.square_size = 45  # Smaller to fit two boards and buttons
+        self.square_size = 45  # Reasonable size for visibility
         self.setup_ui()
         self.display_initial_positions()
+        # Calculate evals for all PV moves in background
+        self.calculate_pv_evals()
+        
+        # Cleanup engine on window close
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
     
     def setup_ui(self):
         """Set up the interactive board UI with two boards side by side."""
@@ -1140,24 +1160,24 @@ class MistakeBoardWindow(tk.Toplevel):
         title = tk.Label(
             self,
             text=f"Move {self.mistake_analysis.get('chess_move', 'N/A'):.1f} - {self.mistake_analysis.get('severity', 'Mistake')}",
-            font=("Segoe UI", 16, "bold"),
+            font=("Segoe UI", 14, "bold"),
             bg=self.colors["bg"],
             fg=self.colors["text"]
         )
-        title.pack(pady=5)
+        title.pack(pady=(5, 3))
         
-        # Mistake explanation section (above boards)
-        explanation_frame = tk.Frame(self, bg=self.colors["card"], relief=tk.RAISED, bd=2)
-        explanation_frame.pack(fill=tk.X, padx=20, pady=(0, 5))
+        # Mistake explanation section (above boards) - compact
+        explanation_frame = tk.Frame(self, bg=self.colors["card"], relief=tk.RAISED, bd=1)
+        explanation_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
         
         explanation_title = tk.Label(
             explanation_frame,
             text="Mistake Explanation",
-            font=("Segoe UI", 11, "bold"),
+            font=("Segoe UI", 10, "bold"),
             bg=self.colors["card"],
             fg=self.colors["text"]
         )
-        explanation_title.pack(pady=(8, 3))
+        explanation_title.pack(pady=(5, 2))
         
         self.explanation_text = tk.Text(
             explanation_frame,
@@ -1165,202 +1185,327 @@ class MistakeBoardWindow(tk.Toplevel):
             bg=self.colors["card"],
             fg=self.colors["text"],
             wrap=tk.WORD,
-            height=3,
-            padx=10,
-            pady=8,
+            height=2,
+            padx=8,
+            pady=4,
             relief=tk.FLAT,
             borderwidth=0
         )
-        self.explanation_text.pack(fill=tk.X, padx=10, pady=(0, 8))
+        self.explanation_text.pack(fill=tk.X, padx=8, pady=(0, 5))
         self.explanation_text.config(state=tk.DISABLED)  # Make it read-only
         
         # Main container for two boards
         main_container = tk.Frame(self, bg=self.colors["bg"])
-        main_container.pack(expand=True, fill=tk.BOTH, padx=20, pady=5)
+        main_container.pack(expand=True, fill=tk.BOTH, padx=10, pady=3)
         
         # Left board: Why it's a mistake (continuation after mistake)
-        left_frame = tk.Frame(main_container, bg=self.colors["card"], relief=tk.RAISED, bd=2)
-        left_frame.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=(0, 10))
+        left_frame = tk.Frame(main_container, bg=self.colors["card"], relief=tk.RAISED, bd=1)
+        left_frame.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=(0, 5))
+        
+        # Create navigation frame FIRST and pack at bottom - make it VERY prominent
+        left_nav_frame = tk.Frame(left_frame, bg="#E74C3C", relief=tk.RAISED, bd=3)  # Red background to make it obvious
+        left_nav_frame.pack(side=tk.BOTTOM, pady=(0, 0), fill=tk.X, padx=0)
+        left_nav_frame.pack_propagate(False)  # Prevent shrinking
+        left_nav_frame.config(height=36)  # Compact nav bar
+        
+        # Content frame for everything else - use canvas for scrolling if needed
+        left_content_canvas = tk.Canvas(left_frame, bg=self.colors["card"], highlightthickness=0)
+        left_content_scrollbar = tk.Scrollbar(left_frame, orient=tk.VERTICAL, command=left_content_canvas.yview)
+        left_content = tk.Frame(left_content_canvas, bg=self.colors["card"])
+        left_content_canvas.create_window((0, 0), window=left_content, anchor="nw")
+        left_content_canvas.config(yscrollcommand=left_content_scrollbar.set)
+        left_content_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        left_content_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        def configure_scroll_region(event):
+            left_content_canvas.configure(scrollregion=left_content_canvas.bbox("all"))
+        left_content.bind("<Configure>", configure_scroll_region)
         
         left_title = tk.Label(
-            left_frame,
+            left_content,
             text="Why It's a Mistake",
-            font=("Segoe UI", 11, "bold"),
+            font=("Segoe UI", 10, "bold"),
             bg=self.colors["card"],
             fg=self.colors["negative"]
         )
-        left_title.pack(pady=(8, 3))
+        left_title.pack(pady=(5, 2))
         
         self.left_board_canvas = tk.Canvas(
-            left_frame,
-            width=self.square_size*8 + 40,
-            height=self.square_size*8 + 40,
+            left_content,
+            width=self.square_size*8 + 30,
+            height=self.square_size*8 + 30,
             bg=self.colors["card"],
             highlightthickness=0
         )
-        self.left_board_canvas.pack(padx=8, pady=5)
+        self.left_board_canvas.pack(padx=6, pady=3)
         
         self.left_info_label = tk.Label(
-            left_frame,
+            left_content,
             text="",
             font=("Segoe UI", 9),
             bg=self.colors["card"],
             fg=self.colors["text"],
-            wraplength=280,
+            wraplength=300,
             justify=tk.LEFT,
-            padx=8,
-            pady=3
+            padx=6,
+            pady=2
         )
         self.left_info_label.pack()
         
-        # Left board navigation
-        left_nav_frame = tk.Frame(left_frame, bg=self.colors["card"])
-        left_nav_frame.pack(pady=5)
+        # Material debug info display (under chessboard)
+        material_label = tk.Label(
+            left_content,
+            text="Material:",
+            font=("Segoe UI", 9, "bold"),
+            bg=self.colors["card"],
+            fg="#FFD700"
+        )
+        material_label.pack(pady=(3, 1))
+        
+        self.material_text = tk.Text(
+            left_content,
+            font=("Courier New", 9),
+            bg=self.colors["bg"],
+            fg="#FFD700",
+            wrap=tk.WORD,
+            height=10,
+            padx=4,
+            pady=2,
+            relief=tk.FLAT,
+            borderwidth=0
+        )
+        self.material_text.pack(fill=tk.X, padx=6, pady=(0, 3))
+        self.material_text.config(state=tk.DISABLED)
         
         self.left_prev_button = tk.Button(
             left_nav_frame,
             text="◀ Prev",
             command=self.left_prev_move,
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", 8),
             bg=self.colors["accent"],
             fg="white",
             activebackground="#2980B9",
-            relief=tk.FLAT,
-            padx=10,
-            pady=5,
+            relief=tk.RAISED,
+            bd=1,
+            padx=4,
+            pady=2,
             cursor="hand2"
         )
-        self.left_prev_button.pack(side=tk.LEFT, padx=2)
+        self.left_prev_button.pack(side=tk.LEFT, padx=2, fill=tk.BOTH, expand=True)
         
         self.left_reset_button = tk.Button(
             left_nav_frame,
             text="Reset",
             command=self.left_reset,
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", 8),
             bg="#95A5A6",
             fg="white",
             activebackground="#7F8C8D",
-            relief=tk.FLAT,
-            padx=10,
-            pady=5,
+            relief=tk.RAISED,
+            bd=1,
+            padx=4,
+            pady=2,
             cursor="hand2"
         )
-        self.left_reset_button.pack(side=tk.LEFT, padx=2)
+        self.left_reset_button.pack(side=tk.LEFT, padx=2, fill=tk.BOTH, expand=True)
         
         self.left_next_button = tk.Button(
             left_nav_frame,
             text="Next ▶",
             command=self.left_next_move,
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", 8),
             bg=self.colors["accent"],
             fg="white",
             activebackground="#2980B9",
-            relief=tk.FLAT,
-            padx=10,
-            pady=5,
+            relief=tk.RAISED,
+            bd=1,
+            padx=4,
+            pady=2,
             cursor="hand2"
         )
-        self.left_next_button.pack(side=tk.LEFT, padx=2)
+        self.left_next_button.pack(side=tk.LEFT, padx=2, fill=tk.BOTH, expand=True)
         
         # Right board: Best alternative
-        right_frame = tk.Frame(main_container, bg=self.colors["card"], relief=tk.RAISED, bd=2)
-        right_frame.pack(side=tk.RIGHT, expand=True, fill=tk.BOTH, padx=(10, 0))
+        right_frame = tk.Frame(main_container, bg=self.colors["card"], relief=tk.RAISED, bd=1)
+        right_frame.pack(side=tk.RIGHT, expand=True, fill=tk.BOTH, padx=(5, 0))
+        
+        # Create navigation frame FIRST and pack at bottom - make it VERY prominent
+        right_nav_frame = tk.Frame(right_frame, bg="#E74C3C", relief=tk.RAISED, bd=3)  # Red background to make it obvious
+        right_nav_frame.pack(side=tk.BOTTOM, pady=(0, 0), fill=tk.X, padx=0)
+        right_nav_frame.pack_propagate(False)  # Prevent shrinking
+        right_nav_frame.config(height=36)  # Compact nav bar
+        
+        # Content frame for everything else - use canvas for scrolling if needed
+        right_content_canvas = tk.Canvas(right_frame, bg=self.colors["card"], highlightthickness=0)
+        right_content_scrollbar = tk.Scrollbar(right_frame, orient=tk.VERTICAL, command=right_content_canvas.yview)
+        right_content = tk.Frame(right_content_canvas, bg=self.colors["card"])
+        right_content_canvas.create_window((0, 0), window=right_content, anchor="nw")
+        right_content_canvas.config(yscrollcommand=right_content_scrollbar.set)
+        right_content_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        right_content_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        def configure_scroll_region(event):
+            right_content_canvas.configure(scrollregion=right_content_canvas.bbox("all"))
+        right_content.bind("<Configure>", configure_scroll_region)
         
         right_title = tk.Label(
-            right_frame,
+            right_content,
             text="Best Alternative",
-            font=("Segoe UI", 11, "bold"),
+            font=("Segoe UI", 10, "bold"),
             bg=self.colors["card"],
             fg=self.colors["positive"]
         )
-        right_title.pack(pady=(8, 3))
+        right_title.pack(pady=(5, 2))
         
         self.right_board_canvas = tk.Canvas(
-            right_frame,
-            width=self.square_size*8 + 40,
-            height=self.square_size*8 + 40,
+            right_content,
+            width=self.square_size*8 + 30,
+            height=self.square_size*8 + 30,
             bg=self.colors["card"],
             highlightthickness=0
         )
-        self.right_board_canvas.pack(padx=8, pady=5)
+        self.right_board_canvas.pack(padx=6, pady=3)
         
         self.right_info_label = tk.Label(
-            right_frame,
+            right_content,
             text="",
             font=("Segoe UI", 9),
             bg=self.colors["card"],
             fg=self.colors["text"],
-            wraplength=280,
+            wraplength=300,
             justify=tk.LEFT,
-            padx=8,
-            pady=3
+            padx=6,
+            pady=2
         )
         self.right_info_label.pack()
         
-        # Right board navigation
-        right_nav_frame = tk.Frame(right_frame, bg=self.colors["card"])
-        right_nav_frame.pack(pady=5)
+        # Material debug info display (under chessboard) - Right side
+        right_material_label = tk.Label(
+            right_content,
+            text="Material:",
+            font=("Segoe UI", 9, "bold"),
+            bg=self.colors["card"],
+            fg="#FFD700"
+        )
+        right_material_label.pack(pady=(3, 1))
+        
+        self.right_material_text = tk.Text(
+            right_content,
+            font=("Courier New", 9),
+            bg=self.colors["bg"],
+            fg="#FFD700",
+            wrap=tk.WORD,
+            height=10,
+            padx=4,
+            pady=2,
+            relief=tk.FLAT,
+            borderwidth=0
+        )
+        self.right_material_text.pack(fill=tk.X, padx=6, pady=(0, 3))
+        self.right_material_text.config(state=tk.DISABLED)
         
         self.right_prev_button = tk.Button(
             right_nav_frame,
             text="◀ Prev",
             command=self.right_prev_move,
-            font=("Segoe UI", 8, "bold"),
+            font=("Segoe UI", 8),
             bg=self.colors["accent"],
             fg="white",
             activebackground="#2980B9",
-            relief=tk.FLAT,
-            padx=8,
-            pady=4,
+            relief=tk.RAISED,
+            bd=1,
+            padx=4,
+            pady=2,
             cursor="hand2"
         )
-        self.right_prev_button.pack(side=tk.LEFT, padx=2)
+        self.right_prev_button.pack(side=tk.LEFT, padx=2, fill=tk.BOTH, expand=True)
         
         self.right_reset_button = tk.Button(
             right_nav_frame,
             text="Reset",
             command=self.right_reset,
-            font=("Segoe UI", 8, "bold"),
+            font=("Segoe UI", 8),
             bg="#95A5A6",
             fg="white",
             activebackground="#7F8C8D",
-            relief=tk.FLAT,
-            padx=8,
-            pady=4,
+            relief=tk.RAISED,
+            bd=1,
+            padx=4,
+            pady=2,
             cursor="hand2"
         )
-        self.right_reset_button.pack(side=tk.LEFT, padx=2)
+        self.right_reset_button.pack(side=tk.LEFT, padx=2, fill=tk.BOTH, expand=True)
         
         self.right_next_button = tk.Button(
             right_nav_frame,
             text="Next ▶",
             command=self.right_next_move,
-            font=("Segoe UI", 8, "bold"),
+            font=("Segoe UI", 8),
             bg=self.colors["accent"],
             fg="white",
             activebackground="#2980B9",
-            relief=tk.FLAT,
-            padx=8,
-            pady=4,
+            relief=tk.RAISED,
+            bd=1,
+            padx=4,
+            pady=2,
             cursor="hand2"
         )
-        self.right_next_button.pack(side=tk.LEFT, padx=2)
+        self.right_next_button.pack(side=tk.LEFT, padx=2, fill=tk.BOTH, expand=True)
     
     def display_initial_positions(self):
         """Display initial positions for both boards."""
         # Left board: Start at position BEFORE mistake (so user can see the mistake move first)
         position_before_fen = self.mistake_analysis.get('position_before_fen', self.mistake_analysis.get('position_fen'))
+        # Store position after mistake (move 0.5) for comparison
+        position_after_fen = self.mistake_analysis.get('position_after_fen')
+        if not position_after_fen:
+            # Reconstruct position after mistake
+            temp_board = chess.Board(position_before_fen)
+            move_played = self.mistake_analysis.get('move_played_obj')
+            if not move_played:
+                move_played_str = self.mistake_analysis.get('move_played')
+                if move_played_str and isinstance(move_played_str, str):
+                    try:
+                        move_played = chess.Move.from_uci(move_played_str)
+                    except ValueError:
+                        try:
+                            move_played = temp_board.parse_san(move_played_str)
+                        except ValueError:
+                            move_played = None
+            if move_played and isinstance(move_played, chess.Move) and move_played in temp_board.legal_moves:
+                temp_board.push(move_played)
+                position_after_fen = temp_board.fen()
+            else:
+                position_after_fen = position_before_fen
+        self.position_after_mistake = chess.Board(position_after_fen)  # Store for comparison
         self.current_continuation_index = -1  # -1 means before mistake move, 0 means after mistake, 1+ means continuation
+        self.significant_issue_found = False  # Reset
+        self.significant_issue_move = None
+        self.pv_analysis_log = []
+        self.showing_white_move = False
+        self.pending_black_move_index = None
+        self.current_full_move = 0
         self.draw_left_board(position_before_fen)
-        self.left_info_label.config(text="Position before the mistake.\nClick 'Next ▶' to see the mistake move, then how Black exploits it.")
+        self.left_info_label.config(text="Move 0: Position before the mistake.\nClick 'Next ▶' to see the mistake move, then how Black exploits it.")
+        
+        # Show initial material counts (before mistake)
+        board_before = chess.Board(position_before_fen)
+        mistake_player = chess.WHITE  # Assuming White made the mistake
+        self.update_material_info(board_before, board_before, 0, mistake_player)
         
         # Right board: Show position before mistake
         self.current_best_variation_index = 0
         self.draw_right_board(position_before_fen)
         self.right_info_label.config(text="Position before the mistake.\nClick 'Next ▶' to see the best alternative.")
         
+        # Show initial material counts for right side (before best move)
+        self.update_right_material_info(board_before, board_before, 0, mistake_player)
+        
         # Display initial explanation
         self.update_explanation()
+        self.current_pv_analysis = "Position before the mistake (move 0).\nNavigate forward to see analysis after each Black move (comparing with move 0.5)."
+        self.update_debug_info()
+        self.update_right_debug_info()
         
         self.update_navigation_buttons()
     
@@ -1376,15 +1521,15 @@ class MistakeBoardWindow(tk.Toplevel):
         primary_category = self.mistake_analysis.get('primary_category', 'General Mistake')
         details = self.mistake_analysis.get('details', {})
         
-        # Build explanation text using new explainable format
-        explanation = f"❌ {severity}: {move_played} was played, losing {eval_drop:.2f} pawns in evaluation.\n\n"
+        # Build explanation text - focus on the reason, not eval drop
+        explanation = f"❌ {severity}: {move_played}\n\n"
         
-        # Use new explainable format
-        if 'headline' in details:
+        # Use new explainable format from systematic PV analysis
+        if 'headline' in details and details['headline']:
             explanation += f"🔴 {details['headline']}\n\n"
-            if 'detail' in details:
+            if 'detail' in details and details['detail']:
                 explanation += f"   → {details['detail']}\n\n"
-        elif 'detail' in details:
+        elif 'detail' in details and details['detail']:
             explanation += f"🔴 {details['detail']}\n\n"
         
         # Add detail lines if available
@@ -1400,8 +1545,8 @@ class MistakeBoardWindow(tk.Toplevel):
             explanation += "\n"
         
         # Fallback to old format if new format not available
-        if 'headline' not in details and 'detail' not in details:
-            explanation += f"📋 Category: {primary_category}\n\n"
+        if ('headline' not in details or not details.get('headline')) and ('detail' not in details or not details.get('detail')):
+            explanation += f"📋 {primary_category}\n\n"
             if 'hanging_piece' in details:
                 explanation += f"🔴 {details['hanging_piece']}\n\n"
             if 'king_safety' in details:
@@ -1417,17 +1562,483 @@ class MistakeBoardWindow(tk.Toplevel):
             if 'general' in details:
                 explanation += f"ℹ️ {details['general']}\n\n"
         
-        explanation += "💡 Navigate through the variations below to see how the mistake unfolds and what the best alternative would have been."
+        # If still no explanation, show a generic message
+        if not explanation or explanation.strip() == f"❌ {severity}: {move_played}\n\n":
+            explanation += f"📋 The move {move_played} significantly worsened the position.\n\n"
+        
+        explanation += "💡 Navigate through the variations below to see the continuation and best alternative."
         
         self.explanation_text.insert(1.0, explanation)
         self.explanation_text.config(state=tk.DISABLED)
     
+    def update_material_info(self, board_before, board_after, move_num, mistake_player):
+        """Update the material box with eval and piece difference for this move (left = mistake continuation)."""
+        if not hasattr(self, 'material_text'):
+            return  # Widget not created yet
+        
+        eval_cp = getattr(self, 'pv_evals', {}).get(('mistake', move_num))
+        eval_str = f"{eval_cp / 100.0:.1f}" if eval_cp is not None else "N/A"
+        diffs = get_piece_count_differences(board_after)
+        diff_str = ", ".join([f"{k}={v}" for k, v in sorted(diffs.items())]) if diffs else "equal"
+        
+        self.material_text.config(state=tk.NORMAL)
+        self.material_text.delete(1.0, tk.END)
+        material_info = f"Move {move_num}\n"
+        material_info += f"─────────────────────────────\n"
+        material_info += f"Eval (White): {eval_str}\n"
+        material_info += f"Piece diff (W−B): {diff_str}\n"
+        self.material_text.insert(1.0, material_info)
+        self.material_text.config(state=tk.DISABLED)
+    
+    def update_right_material_info(self, board_before, board_after, move_num, mistake_player):
+        """Update the right side material box with eval and piece difference for this move (best alternative)."""
+        if not hasattr(self, 'right_material_text'):
+            return  # Widget not created yet
+        
+        eval_cp = getattr(self, 'best_pv_evals', {}).get(('best', move_num))
+        eval_str = f"{eval_cp / 100.0:.1f}" if eval_cp is not None else "N/A"
+        diffs = get_piece_count_differences(board_after)
+        diff_str = ", ".join([f"{k}={v}" for k, v in sorted(diffs.items())]) if diffs else "equal"
+        
+        self.right_material_text.config(state=tk.NORMAL)
+        self.right_material_text.delete(1.0, tk.END)
+        material_info = f"Move {move_num}\n"
+        material_info += f"─────────────────────────────\n"
+        material_info += f"Eval (White): {eval_str}\n"
+        material_info += f"Piece diff (W−B): {diff_str}\n"
+        self.right_material_text.insert(1.0, material_info)
+        self.right_material_text.config(state=tk.DISABLED)
+    
+    def calculate_pv_evals(self):
+        """Calculate evals for all PV moves using engine if available."""
+        if not self.engine:
+            # Try to get engine from parent or create one
+            if hasattr(self.master, 'analyzer') and hasattr(self.master.analyzer, 'engine'):
+                self.engine = self.master.analyzer.engine
+            else:
+                # Try to create engine from common path
+                import os
+                stockfish_paths = [
+                    r"C:\Users\sahan\Downloads\stockfish-windows-x86-64-avx2\stockfish\stockfish-windows-x86-64-avx2.exe",
+                    r"C:\stockfish\stockfish.exe",
+                    "stockfish"  # Try system PATH
+                ]
+                for path in stockfish_paths:
+                    if os.path.exists(path) or path == "stockfish":
+                        try:
+                            import chess.engine
+                            self.engine = chess.engine.SimpleEngine.popen_uci(path)
+                            self.engine_created_here = True
+                            break
+                        except Exception:
+                            continue
+                if not self.engine:
+                    print("[WARNING] No engine available for eval calculation")
+                    return
+        
+        # Calculate evals for mistake continuation (left side)
+        position_before_fen = self.mistake_analysis.get('position_before_fen') or self.mistake_analysis.get('position_fen')
+        if not position_before_fen:
+            return
+        
+        board = chess.Board(position_before_fen)
+        move_played = self.mistake_analysis.get('move_played_obj')
+        if not move_played:
+            move_played_str = self.mistake_analysis.get('move_played')
+            if isinstance(move_played_str, str):
+                try:
+                    move_played = chess.Move.from_uci(move_played_str)
+                except ValueError:
+                    try:
+                        move_played = board.parse_san(move_played_str)
+                    except ValueError:
+                        move_played = None
+        
+        # Move 0.5 eval is already in mistake_analysis
+        if move_played and move_played in board.legal_moves:
+            board.push(move_played)
+            try:
+                info = self.engine.analyse(board, chess.engine.Limit(time=0.3), multipv=1)
+                eval_cp = info[0]["score"].white().score(mate_score=10000)
+                self.pv_evals[('mistake', 0.5)] = eval_cp
+            except Exception as e:
+                print(f"[WARNING] Could not calculate eval for move 0.5: {e}")
+        
+        continuation_moves = self.mistake_analysis.get('continuation_moves', [])
+        variation = continuation_moves[0].get('variation', []) if continuation_moves else []
+        
+        for i, var_move_data in enumerate(variation):
+            var_move = var_move_data.get('move')
+            if not isinstance(var_move, chess.Move):
+                if isinstance(var_move, str):
+                    try:
+                        var_move = chess.Move.from_uci(var_move)
+                    except ValueError:
+                        var_move = None
+            if not var_move or var_move not in board.legal_moves:
+                break
+            board.push(var_move)
+            move_number = 1 + i / 2.0
+            try:
+                info = self.engine.analyse(board, chess.engine.Limit(time=0.3), multipv=1)
+                eval_cp = info[0]["score"].white().score(mate_score=10000)
+                self.pv_evals[('mistake', move_number)] = eval_cp
+            except Exception as e:
+                print(f"[WARNING] Could not calculate eval for move {move_number}: {e}")
+        
+        # Calculate evals for best alternative (right side)
+        # variation[0] = best move, variation[1]=first reply, etc. Move numbers: 0, 0.5, 1.0, 1.5, ...
+        board = chess.Board(position_before_fen)
+        try:
+            info = self.engine.analyse(board, chess.engine.Limit(time=0.3), multipv=1)
+            eval_cp = info[0]["score"].white().score(mate_score=10000)
+            self.best_pv_evals[('best', 0)] = eval_cp
+        except Exception as e:
+            print(f"[WARNING] Could not calculate eval for best-alternative position (move 0): {e}")
+        best_moves = self.mistake_analysis.get('best_moves', [])
+        if best_moves and len(best_moves) > 0:
+            first_best = best_moves[0]
+            best_move = first_best.get('move')
+            if not isinstance(best_move, chess.Move) and isinstance(best_move, str):
+                try:
+                    best_move = chess.Move.from_uci(best_move)
+                except ValueError:
+                    best_move = None
+            if best_move and best_move in board.legal_moves:
+                board.push(best_move)
+                try:
+                    info = self.engine.analyse(board, chess.engine.Limit(time=0.3), multipv=1)
+                    eval_cp = info[0]["score"].white().score(mate_score=10000)
+                    self.best_pv_evals[('best', 0.5)] = eval_cp
+                except Exception as e:
+                    print(f"[WARNING] Could not calculate eval for best move 0.5: {e}")
+            variation = first_best.get('variation', [])
+            for i, var_move_data in enumerate(variation[1:]):  # skip variation[0] = best move already pushed
+                var_move = var_move_data.get('move')
+                if not isinstance(var_move, chess.Move):
+                    if isinstance(var_move, str):
+                        try:
+                            var_move = chess.Move.from_uci(var_move)
+                        except ValueError:
+                            var_move = None
+                if not var_move or var_move not in board.legal_moves:
+                    break
+                board.push(var_move)
+                move_number = 0.5 + (i + 1) / 2.0  # 1.0, 1.5, 2.0, ...
+                try:
+                    info = self.engine.analyse(board, chess.engine.Limit(time=0.3), multipv=1)
+                    eval_cp = info[0]["score"].white().score(mate_score=10000)
+                    self.best_pv_evals[('best', move_number)] = eval_cp
+                except Exception as e:
+                    print(f"[WARNING] Could not calculate eval for best move {move_number}: {e}")
+        
+        # Update displays with new evals
+        self.update_debug_info()
+        self.update_right_debug_info()
+        # Refresh right material box so eval for current view is shown (e.g. move 0 at startup)
+        if hasattr(self, 'right_material_text') and hasattr(self, 'current_best_variation_index'):
+            pos = self.mistake_analysis.get('position_before_fen') or self.mistake_analysis.get('position_fen')
+            if pos:
+                b = chess.Board(pos)
+                self.update_right_material_info(b, b, 0, chess.WHITE)
+        # Verify displayed PV matches current Stockfish PV (logs to console)
+        self._verify_pv_lines()
+    
+    def _verify_pv_lines(self):
+        """Re-run Stockfish on the key positions and compare PV with what we display. Logs results to console."""
+        def to_uci(m):
+            if m is None:
+                return None
+            return m.uci() if isinstance(m, chess.Move) else (m if isinstance(m, str) else str(m))
+        if not getattr(self, 'engine', None):
+            return
+        try:
+            # --- Left board (mistake continuation): PV from position AFTER the mistake ---
+            pos_after = self.mistake_analysis.get('position_after_fen')
+            cont = self.mistake_analysis.get('continuation_moves', [])
+            if pos_after and cont and cont[0].get('variation'):
+                stored = [m.get('move') for m in cont[0]['variation']]
+                stored_uci = [to_uci(m) for m in stored if m is not None]
+                b = chess.Board(pos_after)
+                info = self.engine.analyse(b, chess.engine.Limit(time=0.2), multipv=1)
+                engine_pv = info[0].get("pv", [])
+                engine_uci = [m.uci() for m in engine_pv] if engine_pv else []
+                match_left = stored_uci[:len(engine_uci)] == engine_uci[:len(stored_uci)]
+                if match_left and len(stored_uci) == len(engine_uci):
+                    print("[PV verify] Left (mistake continuation): OK — stored PV matches engine PV")
+                else:
+                    print("[PV verify] Left (mistake continuation): MISMATCH")
+                    print("  Stored (first 5):", stored_uci[:5])
+                    print("  Engine (first 5):", engine_uci[:5])
+            # --- Right board (best alternative): PV from position BEFORE the mistake ---
+            pos_before = self.mistake_analysis.get('position_before_fen') or self.mistake_analysis.get('position_fen')
+            best_moves = self.mistake_analysis.get('best_moves', [])
+            if pos_before and best_moves and best_moves[0].get('variation'):
+                stored = [m.get('move') for m in best_moves[0]['variation']]
+                stored_uci = [to_uci(m) for m in stored if m is not None]
+                b = chess.Board(pos_before)
+                info = self.engine.analyse(b, chess.engine.Limit(time=0.2), multipv=1)
+                engine_pv = info[0].get("pv", [])
+                engine_uci = [m.uci() for m in engine_pv] if engine_pv else []
+                match_right = stored_uci[:len(engine_uci)] == engine_uci[:len(stored_uci)]
+                if match_right and len(stored_uci) == len(engine_uci):
+                    print("[PV verify] Right (best alternative): OK — stored PV matches engine PV")
+                else:
+                    print("[PV verify] Right (best alternative): MISMATCH")
+                    print("  Stored (first 5):", stored_uci[:5])
+                    print("  Engine (first 5):", engine_uci[:5])
+        except Exception as e:
+            print("[PV verify] Error during verification:", e)
+    
+    def build_left_pv_move_table(self) -> str:
+        """Build the per-move PV table for the mistake continuation (left side)."""
+        lines = []
+        position_before_fen = self.mistake_analysis.get('position_before_fen') or self.mistake_analysis.get('position_fen')
+        if not position_before_fen:
+            return "No position data."
+        board = chess.Board(position_before_fen)
+        mistake_player = board.turn  # who made the mistake
+        move_played = self.mistake_analysis.get('move_played_obj')
+        if not move_played:
+            move_played_str = self.mistake_analysis.get('move_played')
+            if isinstance(move_played_str, str):
+                try:
+                    move_played = chess.Move.from_uci(move_played_str)
+                except ValueError:
+                    try:
+                        move_played = board.parse_san(move_played_str)
+                    except ValueError:
+                        move_played = None
+        move_0_5_san = self.mistake_analysis.get('move_played_san', move_played.uci() if move_played else '?')
+        curr_eval = self.mistake_analysis.get('curr_eval')
+        try:
+            eval_pawns = float(curr_eval) / 100.0 if curr_eval is not None else None
+        except (TypeError, ValueError):
+            eval_pawns = None
+        
+        # Move 0.5: after the mistake
+        if move_played and move_played in board.legal_moves:
+            board.push(move_played)
+            diffs = get_piece_count_differences(board)
+            diff_str = ", ".join([f"{k}={v}" for k, v in sorted(diffs.items())]) if diffs else "equal"
+            eval_str = f"{eval_pawns:.1f}" if eval_pawns is not None else "N/A"
+            lines.append(f"move 0.5 ({move_0_5_san}): eval: {eval_str}, {diff_str}")
+        
+        continuation_moves = self.mistake_analysis.get('continuation_moves', [])
+        variation = continuation_moves[0].get('variation', []) if continuation_moves else []
+        
+        for i, var_move_data in enumerate(variation):
+            var_move = var_move_data.get('move')
+            if not isinstance(var_move, chess.Move):
+                if isinstance(var_move, str):
+                    try:
+                        var_move = chess.Move.from_uci(var_move)
+                    except ValueError:
+                        var_move = None
+            if not var_move or var_move not in board.legal_moves:
+                break
+            move_san = var_move_data.get('move_san')
+            if not move_san:
+                try:
+                    move_san = board.san(var_move)
+                except Exception:
+                    move_san = var_move.uci()
+            board.push(var_move)
+            move_number = 1 + i / 2.0  # 1, 1.5, 2, 2.5, ...
+            diffs = get_piece_count_differences(board)
+            diff_str = ", ".join([f"{k}={v}" for k, v in sorted(diffs.items())]) if diffs else "equal"
+            move_num_str = f"{int(move_number)}" if move_number == int(move_number) else f"{move_number:.1f}"
+            # Get eval from calculated evals if available
+            eval_key = ('mistake', move_number)
+            if eval_key in self.pv_evals:
+                eval_pawns = self.pv_evals[eval_key] / 100.0
+                eval_str = f"{eval_pawns:.1f}"
+            else:
+                eval_str = "N/A"
+            lines.append(f"move {move_num_str} ({move_san}): eval: {eval_str}, {diff_str}")
+        
+        return "\n".join(lines) if lines else "No PV moves."
+    
+    def build_right_pv_move_table(self) -> str:
+        """Build the per-move PV table for the best alternative (right side)."""
+        lines = []
+        position_before_fen = self.mistake_analysis.get('position_before_fen') or self.mistake_analysis.get('position_fen')
+        if not position_before_fen:
+            return "No position data."
+        board = chess.Board(position_before_fen)
+        mistake_player = board.turn  # who made the mistake (White)
+        
+        best_moves = self.mistake_analysis.get('best_moves', [])
+        if not best_moves or len(best_moves) == 0:
+            return "No best alternative available."
+        
+        first_best = best_moves[0]
+        best_move = first_best.get('move')
+        best_eval = first_best.get('eval')
+        try:
+            eval_pawns = float(best_eval) / 100.0 if best_eval is not None else None
+        except (TypeError, ValueError):
+            eval_pawns = None
+        
+        # Move 0.5: after the best alternative move
+        if best_move and isinstance(best_move, chess.Move) and best_move in board.legal_moves:
+            try:
+                move_san = board.san(best_move)
+            except Exception:
+                move_san = best_move.uci()
+            board.push(best_move)
+            diffs = get_piece_count_differences(board)
+            diff_str = ", ".join([f"{k}={v}" for k, v in sorted(diffs.items())]) if diffs else "equal"
+            # Use calculated eval if available, otherwise use stored eval
+            eval_key = ('best', 0.5)
+            if eval_key in self.best_pv_evals:
+                eval_pawns = self.best_pv_evals[eval_key] / 100.0
+                eval_str = f"{eval_pawns:.1f}"
+            else:
+                eval_str = f"{eval_pawns:.1f}" if eval_pawns is not None else "N/A"
+            lines.append(f"move 0.5 ({move_san}): eval: {eval_str}, {diff_str}")
+        
+        variation = first_best.get('variation', [])
+        
+        for i, var_move_data in enumerate(variation):
+            var_move = var_move_data.get('move')
+            if not isinstance(var_move, chess.Move):
+                if isinstance(var_move, str):
+                    try:
+                        var_move = chess.Move.from_uci(var_move)
+                    except ValueError:
+                        var_move = None
+            if not var_move or var_move not in board.legal_moves:
+                break
+            move_san = var_move_data.get('move_san')
+            if not move_san:
+                try:
+                    move_san = board.san(var_move)
+                except Exception:
+                    move_san = var_move.uci()
+            board.push(var_move)
+            move_number = 1 + i / 2.0  # 1, 1.5, 2, 2.5, ...
+            diffs = get_piece_count_differences(board)
+            diff_str = ", ".join([f"{k}={v}" for k, v in sorted(diffs.items())]) if diffs else "equal"
+            move_num_str = f"{int(move_number)}" if move_number == int(move_number) else f"{move_number:.1f}"
+            # Get eval from calculated evals if available
+            eval_key = ('best', move_number)
+            if eval_key in self.best_pv_evals:
+                eval_pawns = self.best_pv_evals[eval_key] / 100.0
+                eval_str = f"{eval_pawns:.1f}"
+            else:
+                eval_str = "N/A"
+            lines.append(f"move {move_num_str} ({move_san}): eval: {eval_str}, {diff_str}")
+        
+        return "\n".join(lines) if lines else "No PV moves."
+    
+    def update_debug_info(self):
+        """Update the debug info display with PV move table for left side (mistake continuation)."""
+        # PV analysis text box removed - method kept for compatibility but does nothing
+        pass
+    
+    def update_right_debug_info(self):
+        """Update the debug info display with PV move table for right side (best alternative)."""
+        # PV analysis text box removed - method kept for compatibility but does nothing
+        pass
+    
+    def analyze_after_black_move(self, board_after_black: chess.Board, board_after_mistake: chess.Board, 
+                                  black_move: chess.Move, full_move_num: int):
+        """
+        Analyze position after Black's move by comparing with position after White's mistake (move 0.5).
+        This is called after each Black move (after full moves: 1, 2, 3...).
+        
+        IMPORTANT: Analysis is done from White's perspective. All evaluations and comparisons
+        are relative to White's position.
+        
+        Args:
+            board_after_black: Board position after Black's move (White to move - Black has finished)
+            board_after_mistake: Board position after White's mistake (move 0.5, Black to move)
+            black_move: The move Black just played
+            full_move_num: Full move number (1, 2, 3...)
+            
+        Returns:
+            Tuple of (analysis_text: str, found_significant_issue: bool, issue_details: dict or None)
+        """
+        from .mistake_analyzer import MistakeAnalyzer
+        
+        # Note: board_after_black should have board.turn == chess.WHITE (Black has finished)
+        # If it doesn't, we still proceed with analysis as the board state should be correct
+        
+        # Create a MistakeAnalyzer instance - we don't need engine for _check_position_reasons
+        # Create a dummy analyzer (engine can be None since _check_position_reasons doesn't use it)
+        analyzer = MistakeAnalyzer(None)  # Engine not needed for position analysis
+        
+        # mistake_player is White (chess.WHITE = True) - all analysis from White's perspective
+        eval_drop = 0  # We don't have eval drop here, but the method needs it
+        
+        # Check for significant reasons by comparing position after mistake (move 0.5) with position after Black's move
+        # All comparisons are from White's perspective (mistake_player = chess.WHITE)
+        reason = analyzer._check_position_reasons(
+            board_after_mistake,  # Position after White's mistake (move 0.5, Black to move)
+            board_after_black,  # Position after Black's move (White to move - Black has finished)
+            black_move,  # The move that was played (Black's move)
+            chess.WHITE,  # mistake_player (White made the mistake) - analysis from White's perspective
+            eval_drop,
+            full_move_num  # Full move number
+        )
+        
+        if reason and reason.get('found_reason'):
+            # Significant issue found!
+            headline = reason.get('details', {}).get('headline', 'Significant issue found')
+            detail = reason.get('details', {}).get('detail', '')
+            category = reason.get('primary_category', 'Issue')
+            
+            analysis_text = f"Move {full_move_num}: ✓ SIGNIFICANT ISSUE FOUND\n"
+            analysis_text += f"  Category: {category}\n"
+            analysis_text += f"  {headline}\n"
+            if detail:
+                analysis_text += f"  → {detail}\n"
+            analysis_text += f"\nPV analysis continues (will check remaining PV moves)."
+            
+            return analysis_text, True, reason
+        else:
+            # No significant issue found
+            analysis_text = f"Move {full_move_num}: No significant issue found.\n"
+            analysis_text += "  → Position analyzed (compared to move 0.5): Material, king safety, hanging pieces checked.\n"
+            analysis_text += "  → Continue PV to find the mistake reason..."
+            
+            return analysis_text, False, None
+    
     def left_reset(self):
         """Reset left board to position before mistake."""
         position_before_fen = self.mistake_analysis.get('position_before_fen', self.mistake_analysis.get('position_fen'))
+        # Reset position after mistake (move 0.5) for comparison
+        position_after_fen = self.mistake_analysis.get('position_after_fen')
+        if not position_after_fen:
+            # Reconstruct position after mistake
+            temp_board = chess.Board(position_before_fen)
+            move_played = self.mistake_analysis.get('move_played_obj')
+            if not move_played:
+                move_played_str = self.mistake_analysis.get('move_played')
+                if move_played_str and isinstance(move_played_str, str):
+                    try:
+                        move_played = chess.Move.from_uci(move_played_str)
+                    except ValueError:
+                        try:
+                            move_played = temp_board.parse_san(move_played_str)
+                        except ValueError:
+                            move_played = None
+            if move_played and isinstance(move_played, chess.Move) and move_played in temp_board.legal_moves:
+                temp_board.push(move_played)
+                position_after_fen = temp_board.fen()
+            else:
+                position_after_fen = position_before_fen
+        self.position_after_mistake = chess.Board(position_after_fen)  # Reset for comparison
         self.current_continuation_index = -1  # -1 = before mistake, 0 = after mistake, 1+ = continuation
+        self.significant_issue_found = False  # Reset
+        self.significant_issue_move = None
         self.draw_left_board(position_before_fen)
-        self.left_info_label.config(text="Position before the mistake.\nClick 'Next ▶' to see the mistake move, then how Black exploits it.")
+        self.left_info_label.config(text="Move 0: Position before the mistake.\nClick 'Next ▶' to see the mistake move, then how Black exploits it.")
+        self.current_pv_analysis = "Position before the mistake (move 0).\nNavigate forward to see analysis after each Black move (comparing with move 0.5)."
+        board_before = chess.Board(position_before_fen)
+        self.update_material_info(board_before, board_before, 0, chess.WHITE)
+        self.update_debug_info()
         self.update_navigation_buttons()
     
     def right_reset(self):
@@ -1436,16 +2047,91 @@ class MistakeBoardWindow(tk.Toplevel):
         self.current_best_variation_index = 0
         self.draw_right_board(position_before_fen)
         self.right_info_label.config(text="Position before the mistake.\nClick 'Next ▶' to see the best alternative.")
+        
+        # Reset material and PV table
+        board_before = chess.Board(position_before_fen)
+        mistake_player = chess.WHITE
+        self.update_right_material_info(board_before, board_before, 0, mistake_player)
+        self.update_right_debug_info()
         self.update_navigation_buttons()
     
+    def _show_black_move_at_index(self, black_move_index: int) -> bool:
+        """Show Black's move at the given variation index. Returns True if shown."""
+        continuation_moves = self.mistake_analysis.get('continuation_moves', [])
+        if not continuation_moves:
+            return False
+        variation = continuation_moves[0].get('variation', [])
+        if black_move_index < 0 or black_move_index >= len(variation):
+            return False
+
+        position_after_fen = self.mistake_analysis.get('position_after_fen')
+        if not position_after_fen:
+            position_before_fen = self.mistake_analysis.get('position_before_fen')
+            b = chess.Board(position_before_fen)
+            move_played = self.mistake_analysis.get('move_played_obj')
+            if move_played and isinstance(move_played, chess.Move) and move_played in b.legal_moves:
+                b.push(move_played)
+                position_after_fen = b.fen()
+            else:
+                position_after_fen = position_before_fen
+
+        board = chess.Board(position_after_fen)
+        for i in range(black_move_index + 1):
+            if i < len(variation):
+                var_move_data = variation[i]
+                var_move = var_move_data.get('move')
+                if not isinstance(var_move, chess.Move) and isinstance(var_move, str):
+                    try:
+                        var_move = chess.Move.from_uci(var_move)
+                    except ValueError:
+                        continue
+                if var_move and isinstance(var_move, chess.Move) and var_move in board.legal_moves:
+                    board.push(var_move)
+
+        black_move_data = variation[black_move_index]
+        black_move = black_move_data.get('move')
+        if not isinstance(black_move, chess.Move) and isinstance(black_move, str):
+            try:
+                black_move = chess.Move.from_uci(black_move)
+            except ValueError:
+                black_move = None
+        if not black_move or not isinstance(black_move, chess.Move):
+            return False
+
+        self.draw_left_board(board.fen(),
+                            highlight_squares=[black_move.from_square, black_move.to_square],
+                            arrow_from=black_move.from_square,
+                            arrow_to=black_move.to_square)
+        full_move_num = (black_move_index + 1) // 2 + 1
+        move_san = black_move_data.get('move_san', black_move.uci())
+        self.left_info_label.config(text=f"Move {full_move_num}: Black's response: {move_san}\n")
+
+        position_before_fen = self.mistake_analysis.get('position_before_fen')
+        if position_before_fen:
+            board_before = chess.Board(position_before_fen)
+            self.update_material_info(board_before, board, full_move_num, chess.WHITE)
+
+        if self.position_after_mistake is None:
+            self.position_after_mistake = chess.Board(position_after_fen)
+        analysis_text, _, _ = self.analyze_after_black_move(
+            board, self.position_after_mistake, black_move, full_move_num
+        )
+        if analysis_text:
+            self.pv_analysis_log.append(analysis_text)
+        self.current_pv_analysis = "\n\n".join(self.pv_analysis_log) if self.pv_analysis_log else (analysis_text or "")
+        self.update_debug_info()
+
+        self.current_continuation_index = black_move_index + 1
+        self.update_navigation_buttons()
+        return True
+    
     def left_next_move(self):
-        """Move forward: show mistake move first, then continuation."""
-        # If at position before mistake (-1), show the mistake move (0)
+        """Move forward by one ply per click. Each Next shows one half-move."""
+        # If at position before mistake (-1), show move 0.5 only (one ply)
         if self.current_continuation_index == -1:
             position_before_fen = self.mistake_analysis.get('position_before_fen', self.mistake_analysis.get('position_fen'))
             board = chess.Board(position_before_fen)
             move_played = self.mistake_analysis.get('move_played_obj')
-            
             if not move_played:
                 move_played_str = self.mistake_analysis.get('move_played')
                 if move_played_str and isinstance(move_played_str, str):
@@ -1456,25 +2142,25 @@ class MistakeBoardWindow(tk.Toplevel):
                             move_played = board.parse_san(move_played_str)
                         except ValueError:
                             return
-            
-            if move_played and isinstance(move_played, chess.Move) and move_played in board.legal_moves:
-                board.push(move_played)
-                self.current_continuation_index = 0  # Now at position after mistake
-                
-                self.draw_left_board(board.fen(),
-                                   highlight_squares=[move_played.from_square, move_played.to_square],
-                                   arrow_from=move_played.from_square,
-                                   arrow_to=move_played.to_square)
-                
-                move_san = self.mistake_analysis.get('move_played_san', move_played.uci())
-                eval_drop = self.mistake_analysis.get('eval_drop', 0) / 100.0
-                info_text = f"Mistake move: {move_san} (Eval drop: {eval_drop:+.2f} pawns)\n"
-                info_text += "Click 'Next ▶' to see how Black exploits it."
-                self.left_info_label.config(text=info_text)
-                self.update_navigation_buttons()
+            if not (move_played and isinstance(move_played, chess.Move) and move_played in board.legal_moves):
+                return
+            board.push(move_played)
+            self.draw_left_board(board.fen(),
+                               highlight_squares=[move_played.from_square, move_played.to_square],
+                               arrow_from=move_played.from_square,
+                               arrow_to=move_played.to_square)
+            move_san = self.mistake_analysis.get('move_played_san', move_played.uci())
+            self.left_info_label.config(text=f"Move 0.5: White's mistake: {move_san}\nClick 'Next ▶' for Black's reply.")
+            pos_before = self.mistake_analysis.get('position_before_fen', self.mistake_analysis.get('position_fen'))
+            if pos_before:
+                self.update_material_info(chess.Board(pos_before), board, 0.5, chess.WHITE)
+            self.current_continuation_index = 0
+            self.current_pv_analysis = "After mistake move (move 0.5)."
+            self.update_debug_info()
+            self.update_navigation_buttons()
             return
         
-        # Now continue with continuation moves (index 0+)
+        # Now continue with continuation moves
         continuation_moves = self.mistake_analysis.get('continuation_moves', [])
         if not continuation_moves or len(continuation_moves) == 0:
             return
@@ -1483,6 +2169,11 @@ class MistakeBoardWindow(tk.Toplevel):
         variation = first_continuation.get('variation', [])
         
         if not variation:
+            return
+        
+        # At index 0 we're after move 0.5. Next = show Black's first move (one ply)
+        if self.current_continuation_index == 0:
+            self._show_black_move_at_index(0)
             return
         
         # Get starting position (after mistake)
@@ -1499,137 +2190,107 @@ class MistakeBoardWindow(tk.Toplevel):
         
         board = chess.Board(position_after_fen)
         
-        # current_continuation_index: -1 = before mistake, 0 = after mistake, 1+ = continuation moves
-        # When current_continuation_index = 0 (after mistake), we want to show variation[0] (first continuation move)
-        # When current_continuation_index = 1, we want to show variation[1] (second continuation move)
-        # So: variation_index = current_continuation_index (when >= 0, but we're already past 0, so it's current_continuation_index)
-        # Actually: when we're at index 0 (after mistake), next click should show variation[0]
-        # So variation_index should be current_continuation_index when current_continuation_index > 0
-        # But wait, we're already at index 0, so the next move should be variation[0]
-        # So: variation_index = current_continuation_index (since we're already at 0, next is variation[0])
-        
-        # When current_continuation_index = 0, we want variation_index = 0
-        # When current_continuation_index = 1, we want variation_index = 1
-        # So: variation_index = current_continuation_index
-        variation_index = self.current_continuation_index  # Index into variation array (0-based)
-        
-        # Check if we have more moves to show
-        if variation_index >= len(variation):
-            # No more moves, show end message
-            self.left_info_label.config(text="End of continuation shown.")
+        # Variation: [Black_move_1, White_response_1.5, Black_move_2, ...]
+        # Index 1 = after Black's first move. Next ply = White's move at variation[1].
+        # Show only that one ply, do not auto-show the next Black move.
+        ply_index = self.current_continuation_index  # 1, 2, 3, ... into variation
+        if ply_index >= len(variation):
+            self.left_info_label.config(text="End of PV line - all moves shown.")
+            self.update_navigation_buttons()
             return
         
-        # Apply all moves up to and including the current continuation move
-        for i in range(variation_index + 1):  # +1 to include current move
+        ply_move_data = variation[ply_index]
+        ply_move = ply_move_data.get('move')
+        
+        # Convert to Move object if needed
+        if not isinstance(ply_move, chess.Move):
+            if isinstance(ply_move, str):
+                try:
+                    ply_move = chess.Move.from_uci(ply_move)
+                except ValueError:
+                    temp_board = board.copy()
+                    for j in range(ply_index):
+                        if j < len(variation):
+                            prev_move = variation[j].get('move')
+                            if isinstance(prev_move, chess.Move) and prev_move in temp_board.legal_moves:
+                                temp_board.push(prev_move)
+                            elif isinstance(prev_move, str):
+                                try:
+                                    prev_move_uci = chess.Move.from_uci(prev_move)
+                                    if prev_move_uci in temp_board.legal_moves:
+                                        temp_board.push(prev_move_uci)
+                                except ValueError:
+                                    pass
+                    try:
+                        ply_move = temp_board.parse_san(ply_move)
+                    except ValueError:
+                        return
+            else:
+                return
+        
+        # Apply moves up to and including this ply
+        for i in range(ply_index + 1):
             if i < len(variation):
                 var_move_data = variation[i]
                 var_move = var_move_data.get('move')
-                
-                # Convert to Move object if needed (should already be a Move object from analysis)
                 if not isinstance(var_move, chess.Move):
                     if isinstance(var_move, str):
                         try:
                             var_move = chess.Move.from_uci(var_move)
                         except ValueError:
-                            # Try parsing as SAN - need board state before this move
-                            try:
-                                temp_board = board.copy()
-                                # Apply all previous moves in variation to get correct board state
-                                for j in range(i):
-                                    if j < len(variation):
-                                        prev_move = variation[j].get('move')
-                                        if isinstance(prev_move, chess.Move) and prev_move in temp_board.legal_moves:
-                                            temp_board.push(prev_move)
-                                        elif isinstance(prev_move, str):
-                                            try:
-                                                prev_move_uci = chess.Move.from_uci(prev_move)
-                                                if prev_move_uci in temp_board.legal_moves:
-                                                    temp_board.push(prev_move_uci)
-                                            except ValueError:
-                                                pass
-                                var_move = temp_board.parse_san(var_move)
-                            except ValueError:
-                                continue
+                            continue
                     else:
                         continue
-                
-                # Apply the move if it's valid
                 if var_move and isinstance(var_move, chess.Move) and var_move in board.legal_moves:
                     board.push(var_move)
-                else:
-                    # If move is invalid, break out of loop
-                    break
         
-        # Now draw the board with the current position
-        # Highlight the last move that was played
-        if variation_index >= 0 and variation_index < len(variation):
-            last_move_data = variation[variation_index]
-            last_move = last_move_data.get('move')
-            
-            # Convert to Move object if needed (should already be a Move object)
-            if not isinstance(last_move, chess.Move):
-                if isinstance(last_move, str):
-                    try:
-                        last_move = chess.Move.from_uci(last_move)
-                    except ValueError:
-                        # Try parsing as SAN - need board state before this move
-                        try:
-                            temp_board = chess.Board(position_after_fen)
-                            for j in range(variation_index):
-                                if j < len(variation):
-                                    prev_move = variation[j].get('move')
-                                    if isinstance(prev_move, chess.Move) and prev_move in temp_board.legal_moves:
-                                        temp_board.push(prev_move)
-                                    elif isinstance(prev_move, str):
-                                        try:
-                                            prev_move_uci = chess.Move.from_uci(prev_move)
-                                            if prev_move_uci in temp_board.legal_moves:
-                                                temp_board.push(prev_move_uci)
-                                        except ValueError:
-                                            pass
-                            last_move = temp_board.parse_san(last_move)
-                        except ValueError:
-                            last_move = None
-                else:
-                    last_move = None
-            
-            if last_move and isinstance(last_move, chess.Move):
-                self.draw_left_board(board.fen(),
-                                   highlight_squares=[last_move.from_square, last_move.to_square],
-                                   arrow_from=last_move.from_square,
-                                   arrow_to=last_move.to_square)
-            else:
-                self.draw_left_board(board.fen())
-        else:
-            self.draw_left_board(board.fen())
-        
-        # Update info text
-        move_san = variation[variation_index].get('move_san', 'N/A')
-        move_num = self.current_continuation_index
-        info_text = f"Continuation - Move {move_num}: {move_san}\n"
-        if variation_index + 1 < len(variation):
-            next_move_san = variation[variation_index + 1].get('move_san', 'N/A')
-            info_text += f"Next: {next_move_san}"
-        else:
-            info_text += "End of continuation shown."
-        
-        self.left_info_label.config(text=info_text)
-        self.current_continuation_index += 1  # Move to next position
-        self.update_navigation_buttons()
+        # Draw board for this ply only (one half-move per Next)
+        if ply_move and isinstance(ply_move, chess.Move):
+            self.draw_left_board(board.fen(),
+                               highlight_squares=[ply_move.from_square, ply_move.to_square],
+                               arrow_from=ply_move.from_square,
+                               arrow_to=ply_move.to_square)
+            move_san = ply_move_data.get('move_san', ply_move.uci())
+            move_half = 0.5 + (ply_index + 1) / 2.0  # 1.0, 1.5, 2.0, ...
+            self.left_info_label.config(text=f"Move {move_half}: {move_san}\nClick 'Next ▶' for the next ply.")
+            position_before_fen = self.mistake_analysis.get('position_before_fen')
+            if position_before_fen:
+                self.update_material_info(chess.Board(position_before_fen), board, move_half, chess.WHITE)
+            self.current_continuation_index = ply_index + 1
+            self.current_pv_analysis = f"After move {move_half}."
+            self.update_debug_info()
+            self.update_navigation_buttons()
+            return
     
     def left_prev_move(self):
-        """Move backward: go from continuation → mistake move → before mistake."""
+        """Move backward by one ply per click."""
+        if self.showing_white_move:
+            self.showing_white_move = False
+            self.pending_black_move_index = None
+        
         if self.current_continuation_index <= -1:
             return
         
-        self.current_continuation_index -= 1
+        continuation_moves = self.mistake_analysis.get('continuation_moves', [])
+        if not continuation_moves:
+            return
         
-        # If going back to position after mistake (index 0), show the mistake move
-        if self.current_continuation_index == 0:
+        variation = continuation_moves[0].get('variation', [])
+        if not variation:
+            return
+        
+        prev_index = self.current_continuation_index - 1  # One ply back
+        
+        if prev_index == -1:
+            self.current_continuation_index = -1
+            self.left_reset()
+            return
+        if prev_index == 0:
+            # Show move 0.5 only
+            self.current_continuation_index = 0
             position_before_fen = self.mistake_analysis.get('position_before_fen', self.mistake_analysis.get('position_fen'))
             board = chess.Board(position_before_fen)
             move_played = self.mistake_analysis.get('move_played_obj')
-            
             if not move_played:
                 move_played_str = self.mistake_analysis.get('move_played')
                 if move_played_str and isinstance(move_played_str, str):
@@ -1640,133 +2301,72 @@ class MistakeBoardWindow(tk.Toplevel):
                             move_played = board.parse_san(move_played_str)
                         except ValueError:
                             move_played = None
-            
             if move_played and isinstance(move_played, chess.Move) and move_played in board.legal_moves:
                 board.push(move_played)
                 self.draw_left_board(board.fen(),
                                    highlight_squares=[move_played.from_square, move_played.to_square],
                                    arrow_from=move_played.from_square,
                                    arrow_to=move_played.to_square)
-                
                 move_san = self.mistake_analysis.get('move_played_san', move_played.uci())
-                eval_drop = self.mistake_analysis.get('eval_drop', 0) / 100.0
-                info_text = f"Mistake move: {move_san} (Eval drop: {eval_drop:+.2f} pawns)\n"
-                info_text += "Click 'Next ▶' to see how Black exploits it."
-                self.left_info_label.config(text=info_text)
-                self.update_navigation_buttons()
+                self.left_info_label.config(text=f"Move 0.5: White's mistake: {move_san}\nClick 'Next ▶' for Black's reply.")
+                position_before = self.mistake_analysis.get('position_before_fen', self.mistake_analysis.get('position_fen'))
+                if position_before:
+                    self.update_material_info(chess.Board(position_before), board, 0.5, chess.WHITE)
+            self.current_pv_analysis = "After mistake move (move 0.5)."
+            self.update_debug_info()
+            self.update_navigation_buttons()
             return
         
-        # If going back to before mistake (index -1)
-        if self.current_continuation_index == -1:
-            self.left_reset()
-            return
+        self.current_continuation_index = prev_index
         
-        # Otherwise, show previous continuation move
-        continuation_moves = self.mistake_analysis.get('continuation_moves', [])
-        variation = continuation_moves[0].get('variation', []) if continuation_moves else []
-        
+        # Reconstruct position after variation[0..prev_index-1] (last visible move = variation[prev_index-1])
         position_after_fen = self.mistake_analysis.get('position_after_fen')
         if not position_after_fen:
             position_before_fen = self.mistake_analysis.get('position_before_fen')
-            board = chess.Board(position_before_fen)
+            b = chess.Board(position_before_fen)
             move_played = self.mistake_analysis.get('move_played_obj')
-            if move_played and isinstance(move_played, chess.Move) and move_played in board.legal_moves:
-                board.push(move_played)
-                position_after_fen = board.fen()
+            if move_played and isinstance(move_played, chess.Move) and move_played in b.legal_moves:
+                b.push(move_played)
+                position_after_fen = b.fen()
             else:
                 position_after_fen = position_before_fen
         
         board = chess.Board(position_after_fen)
-        
-        # Apply continuation moves up to current index (after decrement)
-        # When we decrement, current_continuation_index goes from 1 to 0, so we want variation[0]
-        # When current_continuation_index = 0, variation_index = 0
-        variation_index = self.current_continuation_index  # After decrement, this is the index we want to show
-        
-        # Apply all moves up to and including the current continuation move
-        for i in range(variation_index + 1):  # +1 to include current move
+        for i in range(prev_index):  # Apply variation[0..prev_index-1]
             if i < len(variation):
                 var_move_data = variation[i]
                 var_move = var_move_data.get('move')
-                
-                # Convert to Move object if needed (should already be a Move object)
-                if not isinstance(var_move, chess.Move):
-                    if isinstance(var_move, str):
-                        try:
-                            var_move = chess.Move.from_uci(var_move)
-                        except ValueError:
-                            # Try parsing as SAN - need board state before this move
-                            try:
-                                temp_board = board.copy()
-                                # Apply all previous moves in variation to get correct board state
-                                for j in range(i):
-                                    if j < len(variation):
-                                        prev_move = variation[j].get('move')
-                                        if isinstance(prev_move, chess.Move) and prev_move in temp_board.legal_moves:
-                                            temp_board.push(prev_move)
-                                        elif isinstance(prev_move, str):
-                                            try:
-                                                prev_move_uci = chess.Move.from_uci(prev_move)
-                                                if prev_move_uci in temp_board.legal_moves:
-                                                    temp_board.push(prev_move_uci)
-                                            except ValueError:
-                                                pass
-                                var_move = temp_board.parse_san(var_move)
-                            except ValueError:
-                                continue
-                    else:
+                if not isinstance(var_move, chess.Move) and isinstance(var_move, str):
+                    try:
+                        var_move = chess.Move.from_uci(var_move)
+                    except ValueError:
                         continue
-                
-                # Apply the move if it's valid
                 if var_move and isinstance(var_move, chess.Move) and var_move in board.legal_moves:
                     board.push(var_move)
-                else:
-                    break
         
-        # Highlight the last move that was played
-        if variation_index >= 0 and variation_index < len(variation):
-            last_move_data = variation[variation_index]
-            last_move = last_move_data.get('move')
-            
-            # Convert to Move object if needed
-            if not isinstance(last_move, chess.Move):
-                if isinstance(last_move, str):
-                    try:
-                        last_move = chess.Move.from_uci(last_move)
-                    except ValueError:
-                        try:
-                            temp_board = chess.Board(position_after_fen)
-                            for j in range(variation_index):
-                                if j < len(variation):
-                                    prev_move = variation[j].get('move')
-                                    if isinstance(prev_move, chess.Move) and prev_move in temp_board.legal_moves:
-                                        temp_board.push(prev_move)
-                                    elif isinstance(prev_move, str):
-                                        try:
-                                            prev_move_uci = chess.Move.from_uci(prev_move)
-                                            if prev_move_uci in temp_board.legal_moves:
-                                                temp_board.push(prev_move_uci)
-                                        except ValueError:
-                                            pass
-                            last_move = temp_board.parse_san(last_move)
-                        except ValueError:
-                            last_move = None
-                else:
-                    last_move = None
-            
-            if last_move and isinstance(last_move, chess.Move):
-                self.draw_left_board(board.fen(),
-                                   highlight_squares=[last_move.from_square, last_move.to_square],
-                                   arrow_from=last_move.from_square,
-                                   arrow_to=last_move.to_square)
-            else:
-                self.draw_left_board(board.fen())
+        last_move_data = variation[prev_index - 1]
+        last_move = last_move_data.get('move')
+        if not isinstance(last_move, chess.Move) and isinstance(last_move, str):
+            try:
+                last_move = chess.Move.from_uci(last_move)
+            except ValueError:
+                last_move = None
+        if last_move and isinstance(last_move, chess.Move):
+            self.draw_left_board(board.fen(),
+                               highlight_squares=[last_move.from_square, last_move.to_square],
+                               arrow_from=last_move.from_square,
+                               arrow_to=last_move.to_square)
         else:
             self.draw_left_board(board.fen())
+        move_san = last_move_data.get('move_san', last_move.uci() if last_move else 'N/A')
+        move_half = 0.5 + prev_index / 2.0
+        self.left_info_label.config(text=f"Move {move_half}: {move_san}\nClick 'Next ▶' for the next ply.")
         
-        move_san = variation[variation_index].get('move_san', 'N/A') if variation_index >= 0 and variation_index < len(variation) else 'N/A'
-        info_text = f"Continuation - Move {self.current_continuation_index}: {move_san}"
-        self.left_info_label.config(text=info_text)
+        position_before_fen = self.mistake_analysis.get('position_before_fen')
+        if position_before_fen:
+            self.update_material_info(chess.Board(position_before_fen), board, move_half, chess.WHITE)
+        self.current_pv_analysis = f"After move {move_half}."
+        self.update_debug_info()
         self.update_navigation_buttons()
     
     def right_next_move(self):
@@ -1776,19 +2376,52 @@ class MistakeBoardWindow(tk.Toplevel):
             return
         
         first_best = best_moves[0]
+        best_move = first_best.get('move')
         variation = first_best.get('variation', [])
-        
-        if not variation:
-            return
         
         position_fen = self.mistake_analysis.get('position_before_fen', self.mistake_analysis.get('position_fen'))
         board = chess.Board(position_fen)
+        board_before = chess.Board(position_fen)
+        mistake_player = chess.WHITE
         
-        for i in range(self.current_best_variation_index):
+        # Handle initial state: show best alternative move (move 0.5)
+        if self.current_best_variation_index == 0:
+            if best_move and isinstance(best_move, chess.Move) and best_move in board.legal_moves:
+                try:
+                    move_san = board.san(best_move)
+                except Exception:
+                    move_san = best_move.uci()
+                board.push(best_move)
+                self.current_best_variation_index = -1  # Special marker: best move shown, now show variation
+                
+                self.draw_right_board(board.fen(),
+                                    highlight_squares=[best_move.from_square, best_move.to_square],
+                                    arrow_from=best_move.from_square,
+                                    arrow_to=best_move.to_square)
+                
+                self.right_info_label.config(text=f"Move 0.5: Best alternative: {move_san}\nClick 'Next ▶' to see continuation.")
+                
+                # Update material and PV table
+                self.update_right_material_info(board_before, board, 0.5, mistake_player)
+                self.update_right_debug_info()
+                self.update_navigation_buttons()
+                return
+        
+        # Variation from analyzer: variation[0] = best move, variation[1] = first reply, etc.
+        # When at -1 we've shown variation[0] (best move). Next ply = variation[1].
+        # When at 1 we've shown variation[0..1]. Next ply = variation[2]. So next_ply_idx = 1 if -1 else current+1.
+        next_ply_idx = 1 if self.current_best_variation_index == -1 else (self.current_best_variation_index + 1)
+        if next_ply_idx >= len(variation):
+            self.update_navigation_buttons()
+            return
+        
+        # Board = position + variation[0..next_ply_idx-1]
+        board = chess.Board(position_fen)
+        for i in range(next_ply_idx):
             if i < len(variation):
                 var_move_data = variation[i]
                 var_move = var_move_data.get('move')
-                if isinstance(var_move, str):
+                if not isinstance(var_move, chess.Move) and isinstance(var_move, str):
                     try:
                         var_move = chess.Move.from_uci(var_move)
                     except ValueError:
@@ -1796,93 +2429,146 @@ class MistakeBoardWindow(tk.Toplevel):
                             var_move = board.parse_san(var_move)
                         except ValueError:
                             continue
-                if var_move and var_move in board.legal_moves:
+                if var_move and isinstance(var_move, chess.Move) and var_move in board.legal_moves:
                     board.push(var_move)
         
-        if self.current_best_variation_index < len(variation):
-            var_move_data = variation[self.current_best_variation_index]
-            var_move = var_move_data.get('move')
-            if isinstance(var_move, str):
+        var_move_data = variation[next_ply_idx]
+        var_move = var_move_data.get('move')
+        if not isinstance(var_move, chess.Move) and isinstance(var_move, str):
+            try:
+                var_move = chess.Move.from_uci(var_move)
+            except ValueError:
                 try:
-                    var_move = chess.Move.from_uci(var_move)
+                    var_move = board.parse_san(var_move)
                 except ValueError:
+                    self.update_navigation_buttons()
+                    return
+        if not (var_move and isinstance(var_move, chess.Move) and var_move in board.legal_moves):
+            self.update_navigation_buttons()
+            return
+        board.push(var_move)
+        self.current_best_variation_index = next_ply_idx
+        
+        board_before = chess.Board(position_fen)
+        for j in range(next_ply_idx):
+            if j < len(variation):
+                prev_var_move = variation[j].get('move')
+                if not isinstance(prev_var_move, chess.Move) and isinstance(prev_var_move, str):
                     try:
-                        var_move = board.parse_san(var_move)
+                        prev_var_move = chess.Move.from_uci(prev_var_move)
                     except ValueError:
-                        return
-            
-            if var_move and var_move in board.legal_moves:
-                board.push(var_move)
-                self.current_best_variation_index += 1
-                
-                self.draw_right_board(board.fen(),
-                                    highlight_squares=[var_move.from_square, var_move.to_square],
-                                    arrow_from=var_move.from_square,
-                                    arrow_to=var_move.to_square)
-                
-                move_san = variation[self.current_best_variation_index - 1].get('move_san', 'N/A')
-                move_num = self.current_best_variation_index
-                info_text = f"Best variation - Move {move_num}: {move_san}\n"
-                if self.current_best_variation_index < len(variation):
-                    next_move_san = variation[self.current_best_variation_index].get('move_san', 'N/A')
-                    info_text += f"Next: {next_move_san}"
-                else:
-                    info_text += "End of variation shown."
-                
-                self.right_info_label.config(text=info_text)
-                self.update_navigation_buttons()
+                        continue
+                if prev_var_move and isinstance(prev_var_move, chess.Move) and prev_var_move in board_before.legal_moves:
+                    board_before.push(prev_var_move)
+        
+        self.draw_right_board(board.fen(),
+                            highlight_squares=[var_move.from_square, var_move.to_square],
+                            arrow_from=var_move.from_square,
+                            arrow_to=var_move.to_square)
+        move_san = var_move_data.get('move_san', var_move_data.get('move_uci', var_move.uci() if var_move else 'N/A'))
+        move_number = 0.5 + next_ply_idx / 2.0
+        move_num_str = f"{int(move_number)}" if move_number == int(move_number) else f"{move_number:.1f}"
+        info_text = f"Move {move_num_str}: {move_san}\n"
+        upcoming_moves = [variation[i].get('move_san', variation[i].get('move_uci', 'N/A')) for i in range(next_ply_idx + 1, min(next_ply_idx + 4, len(variation)))]
+        info_text += f"Next: {' '.join(upcoming_moves[:3])}" if upcoming_moves else "End of variation."
+        self.right_info_label.config(text=info_text)
+        self.update_right_material_info(board_before, board, move_number, mistake_player)
+        self.update_right_debug_info()
+        self.update_navigation_buttons()
     
     def right_prev_move(self):
         """Move backward in the best variation."""
-        if self.current_best_variation_index <= 0:
+        best_moves = self.mistake_analysis.get('best_moves', [])
+        if not best_moves:
             return
         
+        first_best = best_moves[0]
+        best_move = first_best.get('move')
+        variation = first_best.get('variation', [])
+        
+        # If we're at -1 (best move shown), go back to initial position
+        if self.current_best_variation_index == -1:
+            self.right_reset()
+            return
+        
+        # Go back one ply
         self.current_best_variation_index -= 1
         
+        # After going back, 0 means "best move shown" (one ply back from variation[0])
         if self.current_best_variation_index == 0:
-            self.right_reset()
-        else:
             position_fen = self.mistake_analysis.get('position_before_fen', self.mistake_analysis.get('position_fen'))
             board = chess.Board(position_fen)
-            variation = self.mistake_analysis.get('best_moves', [{}])[0].get('variation', [])
-            
-            for i in range(self.current_best_variation_index):
-                if i < len(variation):
-                    var_move_data = variation[i]
-                    var_move = var_move_data.get('move')
-                    if isinstance(var_move, str):
-                        try:
-                            var_move = chess.Move.from_uci(var_move)
-                        except ValueError:
-                            try:
-                                var_move = board.parse_san(var_move)
-                            except ValueError:
-                                continue
-                    if var_move and var_move in board.legal_moves:
-                        board.push(var_move)
-            
-            if self.current_best_variation_index > 0:
-                prev_move_data = variation[self.current_best_variation_index - 1]
-                prev_move = prev_move_data.get('move')
-                if isinstance(prev_move, str):
+            board_before = chess.Board(position_fen)
+            if best_move and isinstance(best_move, chess.Move) and best_move in board.legal_moves:
+                board.push(best_move)
+                try:
+                    move_san = chess.Board(position_fen).san(best_move)
+                except Exception:
+                    move_san = best_move.uci()
+                self.draw_right_board(board.fen(),
+                                    highlight_squares=[best_move.from_square, best_move.to_square],
+                                    arrow_from=best_move.from_square,
+                                    arrow_to=best_move.to_square)
+                self.right_info_label.config(text=f"Move 0.5: Best alternative: {move_san}\nClick 'Next ▶' to see continuation.")
+                mistake_player = chess.WHITE
+                self.update_right_material_info(board_before, board, 0.5, mistake_player)
+                self.update_right_debug_info()
+                self.current_best_variation_index = -1
+                self.update_navigation_buttons()
+            return
+        
+        # Now we're at index 1, 2, 3... — show position after variation[0..current] (variation[0]=best move)
+        position_fen = self.mistake_analysis.get('position_before_fen', self.mistake_analysis.get('position_fen'))
+        board = chess.Board(position_fen)
+        board_before = chess.Board(position_fen)
+        for i in range(self.current_best_variation_index + 1):
+            if i < len(variation):
+                var_move_data = variation[i]
+                var_move = var_move_data.get('move')
+                if not isinstance(var_move, chess.Move) and isinstance(var_move, str):
                     try:
-                        prev_move = chess.Move.from_uci(prev_move)
+                        var_move = chess.Move.from_uci(var_move)
                     except ValueError:
                         try:
-                            prev_move = board.parse_san(prev_move)
+                            var_move = board.parse_san(var_move)
                         except ValueError:
-                            prev_move = None
-                
-                if prev_move:
-                    self.draw_right_board(board.fen(),
-                                        highlight_squares=[prev_move.from_square, prev_move.to_square],
-                                        arrow_from=prev_move.from_square,
-                                        arrow_to=prev_move.to_square)
-            
-            move_san = variation[self.current_best_variation_index - 1].get('move_san', 'N/A') if self.current_best_variation_index > 0 else 'N/A'
-            info_text = f"Best variation - Move {self.current_best_variation_index}: {move_san}"
-            self.right_info_label.config(text=info_text)
-            self.update_navigation_buttons()
+                            continue
+                if var_move and isinstance(var_move, chess.Move) and var_move in board.legal_moves:
+                    board.push(var_move)
+                    if i < self.current_best_variation_index:
+                        board_before.push(var_move)
+        
+        last_move_data = variation[self.current_best_variation_index]
+        last_move = last_move_data.get('move')
+        if not isinstance(last_move, chess.Move) and isinstance(last_move, str):
+            try:
+                last_move = chess.Move.from_uci(last_move)
+            except ValueError:
+                try:
+                    last_move = board.parse_san(last_move)
+                except ValueError:
+                    last_move = None
+        if last_move:
+            self.draw_right_board(board.fen(),
+                                highlight_squares=[last_move.from_square, last_move.to_square],
+                                arrow_from=last_move.from_square,
+                                arrow_to=last_move.to_square)
+        else:
+            self.draw_right_board(board.fen())
+        
+        move_san = last_move_data.get('move_san', last_move.uci() if last_move else 'N/A')
+        move_number = 0.5 + self.current_best_variation_index / 2.0
+        move_num_str = f"{int(move_number)}" if move_number == int(move_number) else f"{move_number:.1f}"
+        info_text = f"Move {move_num_str}: {move_san}\n"
+        upcoming_moves = []
+        for i in range(self.current_best_variation_index + 1, min(self.current_best_variation_index + 4, len(variation))):
+            upcoming_moves.append(variation[i].get('move_san', variation[i].get('move_uci', 'N/A')))
+        info_text += f"Next: {' '.join(upcoming_moves[:3])}" if upcoming_moves else "End of variation."
+        self.right_info_label.config(text=info_text)
+        mistake_player = chess.WHITE
+        self.update_right_material_info(board_before, board, move_number, mistake_player)
+        self.update_right_debug_info()
+        self.update_navigation_buttons()
     
     def update_navigation_buttons(self):
         """Update navigation button states for both boards."""
@@ -1893,19 +2579,36 @@ class MistakeBoardWindow(tk.Toplevel):
         # When current_continuation_index = len(variation), we're past the end
         continuation_moves = self.mistake_analysis.get('continuation_moves', [])
         continuation_variation = continuation_moves[0].get('variation', []) if continuation_moves else []
-        # Maximum index: we can go up to len(variation) (showing all moves)
-        # When current_continuation_index = len(variation), we're past the end
-        max_continuation_index = len(continuation_variation)
+        # Maximum index: we can go up to len(variation) to show the end state
+        # When current_continuation_index = len(variation), we're at the end (showing final position)
+        # When current_continuation_index > len(variation), we're past the end
+        max_continuation_index = len(continuation_variation)  # Allow going to len(variation) to show end
         
         self.left_prev_button.config(state=tk.NORMAL if self.current_continuation_index > -1 else tk.DISABLED)
-        self.left_next_button.config(state=tk.NORMAL if self.current_continuation_index < max_continuation_index else tk.DISABLED)
+        # Continue through entire PV - allow going to len(variation) to show final position
+        # Enable button when current_continuation_index <= len(variation) (allows showing end state)
+        # Disable only when we're past the end (current_continuation_index > len(variation))
+        self.left_next_button.config(state=tk.NORMAL if self.current_continuation_index <= max_continuation_index else tk.DISABLED)
         
         # Right board (best variation)
         best_moves = self.mistake_analysis.get('best_moves', [])
         best_variation = best_moves[0].get('variation', []) if best_moves else []
         
-        self.right_prev_button.config(state=tk.NORMAL if self.current_best_variation_index > 0 else tk.DISABLED)
-        self.right_next_button.config(state=tk.NORMAL if self.current_best_variation_index < len(best_variation) else tk.DISABLED)
+        # current_best_variation_index: 0 = before best move, -1 = best move shown, 1+ = plies shown (variation[0..index])
+        self.right_prev_button.config(state=tk.NORMAL if self.current_best_variation_index != 0 else tk.DISABLED)
+        # Can advance if: at 0 (show best move), or next ply index < len (next_ply_idx = 1 when -1 else index+1)
+        next_ply_idx = 1 if self.current_best_variation_index == -1 else (self.current_best_variation_index + 1)
+        can_advance = (self.current_best_variation_index == 0) or (next_ply_idx < len(best_variation))
+        self.right_next_button.config(state=tk.NORMAL if can_advance else tk.DISABLED)
+    
+    def on_close(self):
+        """Clean up resources when window is closed."""
+        if self.engine_created_here and self.engine:
+            try:
+                self.engine.quit()
+            except Exception:
+                pass
+        self.destroy()
     
     def draw_left_board(self, fen, highlight_squares=None, arrow_from=None, arrow_to=None):
         """Draw the left chess board from FEN with optional highlights."""
@@ -1916,9 +2619,12 @@ class MistakeBoardWindow(tk.Toplevel):
         self.draw_board(self.right_board_canvas, fen, highlight_squares, arrow_from, arrow_to)
     
     def draw_board(self, canvas, fen, highlight_squares=None, arrow_from=None, arrow_to=None):
-        """Draw the chess board from FEN with optional highlights."""
+        """Draw the chess board from FEN with optional highlights. Always shows from White's perspective."""
         canvas.delete("all")
         board = chess.Board(fen)
+        
+        # Ensure board is always shown from White's perspective
+        # (White at bottom, Black at top)
         
         # Draw squares
         for row in range(8):

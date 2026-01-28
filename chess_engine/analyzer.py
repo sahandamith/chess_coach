@@ -35,9 +35,62 @@ class ChessAnalyzer:
     def open_engine(self):
         """Start the chess engine process."""
         if self.engine is None:
-            self.engine = chess.engine.SimpleEngine.popen_uci(self.engine_path)
-            self.mistake_analyzer = MistakeAnalyzer(self.engine)
-            print("Chess engine started successfully.")
+            import os
+            if not os.path.exists(self.engine_path):
+                raise FileNotFoundError(f"Stockfish engine not found at: {self.engine_path}")
+            
+            try:
+                # Try with increased timeout to allow more time for initialization
+                # The engine might need more time if it's struggling with memory allocation
+                self.engine = chess.engine.SimpleEngine.popen_uci(
+                    self.engine_path,
+                    timeout=30.0  # Increase timeout to 30 seconds
+                )
+                
+                # Wait a moment for engine to fully initialize
+                import time
+                time.sleep(0.2)  # Slightly longer wait
+                
+                # Configure Stockfish to use minimal memory to avoid allocation errors
+                try:
+                    # Set hash to a very small value (16MB) to avoid allocation failures
+                    self.engine.configure({"Hash": 16})  # Use 16MB hash (minimum)
+                    print("Configured Stockfish to use 16MB hash table.")
+                except Exception as config_error:
+                    print(f"Warning: Could not configure Stockfish memory settings: {config_error}")
+                    # Try to continue - engine might work with defaults
+                
+                self.mistake_analyzer = MistakeAnalyzer(self.engine)
+                print("Chess engine started successfully.")
+            except chess.engine.EngineTerminatedError as e:
+                print(f"\n{'='*60}")
+                print(f"ERROR: Stockfish engine crashed during startup")
+                print(f"{'='*60}")
+                print(f"Engine path: {self.engine_path}")
+                print(f"Exit code: 3221225477 (Access Violation)")
+                print(f"\nThis error typically indicates:")
+                print("  • Stockfish is failing to allocate memory during initialization")
+                print("  • The executable may be corrupted or incompatible")
+                print("  • Windows Defender/antivirus may be interfering")
+                print(f"\nRecommended solutions:")
+                print("  1. Download a fresh copy of Stockfish 16 or 17 from:")
+                print("     https://stockfishchess.org/download/")
+                print("  2. Try the 'modern' build instead of 'avx2' build")
+                print("  3. Extract to a different location (e.g., C:\\Stockfish\\)")
+                print("  4. Temporarily disable antivirus and try again")
+                print("  5. Check Windows Event Viewer for more details")
+                print(f"\nIf the problem persists, try an older Stockfish version (15 or 16)")
+                print(f"{'='*60}\n")
+                raise
+            except Exception as e:
+                print(f"Error starting chess engine: {e}")
+                print(f"Engine path: {self.engine_path}")
+                print("\nTroubleshooting tips:")
+                print("1. Verify the Stockfish executable exists at the specified path")
+                print("2. Make sure you're using the correct version (64-bit for 64-bit Windows)")
+                print("3. Try downloading a fresh copy of Stockfish from https://stockfishchess.org/download/")
+                print("4. Check if Windows Defender or antivirus is blocking the executable")
+                raise
         return self.engine
     
     def close_engine(self):
@@ -255,8 +308,9 @@ class ChessAnalyzer:
                     continuation_moves = curr_result.get('best_moves', []) if curr_result else []
                     
                     # Analyze the mistake using stored evaluations and best moves
+                    # Pass continuation_moves to help with systematic PV-based reason detection
                     mistake_analysis = self.mistake_analyzer.analyze_mistake_position(
-                        temp_board, prev_eval, curr_eval, move_played, best_moves_before
+                        temp_board, prev_eval, curr_eval, move_played, best_moves_before, continuation_moves
                     )
                     
                     # Add continuation moves (how Black exploits the mistake)

@@ -7,7 +7,53 @@ best move suggestions and mistake types (piece hanging, king safety, etc.).
 
 import chess
 import chess.engine
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
+
+
+def get_piece_counts(board: chess.Board, color: bool) -> Dict[str, int]:
+    """
+    Return piece counts for the given color as P, N, B, R, Q, K (White-style symbols).
+    Useful for display in PV/mistake windows.
+
+    Returns:
+        Dict with keys 'P','N','B','R','Q','K' and counts.
+    """
+    piece_to_key = {
+        chess.PAWN: 'P',
+        chess.KNIGHT: 'N',
+        chess.BISHOP: 'B',
+        chess.ROOK: 'R',
+        chess.QUEEN: 'Q',
+        chess.KING: 'K',
+    }
+    counts = {'P': 0, 'N': 0, 'B': 0, 'R': 0, 'Q': 0, 'K': 0}
+    for square in chess.SQUARES:
+        piece = board.piece_at(square)
+        if piece and piece.color == color:
+            key = piece_to_key.get(piece.piece_type)
+            if key:
+                counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def get_piece_count_differences(board: chess.Board) -> Dict[str, int]:
+    """
+    Return piece count differences (White - Black) as P, N, B, R, Q, K.
+    Only includes pieces where there's a difference (non-zero).
+    
+    Returns:
+        Dict with keys 'P','N','B','R','Q','K' and differences (only non-zero values).
+    """
+    white_counts = get_piece_counts(board, chess.WHITE)
+    black_counts = get_piece_counts(board, chess.BLACK)
+    
+    differences = {}
+    for piece_type in ['P', 'N', 'B', 'R', 'Q', 'K']:
+        diff = white_counts[piece_type] - black_counts[piece_type]
+        if diff != 0:  # Only include non-zero differences
+            differences[piece_type] = diff
+    
+    return differences
 
 
 class MistakeAnalyzer:
@@ -81,9 +127,10 @@ class MistakeAnalyzer:
             return {'eval': None, 'best_moves': [], 'info': None}
     
     def categorize_mistake(self, board: chess.Board, prev_eval: float, curr_eval: float, 
-                          move: chess.Move, board_before: chess.Board = None) -> Dict:
+                          move: chess.Move, board_before: chess.Board = None, 
+                          continuation_moves: List[Dict] = None, debug_callback=None) -> Dict:
         """
-        Categorize a mistake using explainable reason detectors.
+        Categorize a mistake by systematically checking Stockfish's PV move by move.
         
         Args:
             board: The board position after the mistake
@@ -91,10 +138,12 @@ class MistakeAnalyzer:
             curr_eval: Evaluation after the move (centipawns)
             move: The move that was played
             board_before: The board position before the mistake (optional)
+            continuation_moves: The PV (principal variation) from position after mistake
             
         Returns:
             Dictionary with mistake category and details
         """
+        # categorize_mistake called
         if board_before is None:
             board_before = board.copy()
             try:
@@ -103,114 +152,450 @@ class MistakeAnalyzer:
                 pass
         
         eval_drop = prev_eval - curr_eval  # Positive means position got worse
-        mover = board.turn  # The player who just moved (opponent's turn now)
+        mover = not board.turn  # The player who made the mistake (White if it's Black's turn now)
         
-        # Run all detectors and collect reasons
-        reasons = []
+        # Get PV from continuation_moves if available
+        pv_moves = []
+        if continuation_moves and len(continuation_moves) > 0:
+            first_continuation = continuation_moves[0]
+            variation = first_continuation.get('variation', [])
+            for var_move_data in variation:
+                pv_move = var_move_data.get('move')
+                if isinstance(pv_move, chess.Move):
+                    pv_moves.append(pv_move)
+                elif isinstance(pv_move, str):
+                    try:
+                        pv_moves.append(chess.Move.from_uci(pv_move))
+                    except:
+                        pass
+        # If no PV provided, check immediate position
+        if not pv_moves:
+            return self._check_position_reasons(board_before, board, move, mover, eval_drop, move_num=0)
         
-        # Priority 1: Immediate threats (highest priority)
-        reason = self._hanging_piece(board, mover)
-        if reason:
-            reasons.append((1, reason))
+        # Step through PV moves until the end
+        # Check material loss at move 0.5 (the mistake) and integer moves (1, 2, 3, etc.)
+        temp_board = board.copy()  # Start from position after mistake (move 0.5)
+        mistake_player = mover  # The one who made the mistake
         
-        reason = self._missed_mate_threat(board, mover)
-        if reason:
-            reasons.append((1, reason))
+        # Track all reasons found throughout the PV
+        all_reasons = []
         
-        # Priority 2: Material issues
-        reason = self._allowed_hanging_piece_next_move(board, mover)
-        if reason:
-            reasons.append((2, reason))
+        # Store debug info for GUI display
+        debug_info_list = []
+        debug_info_list.append(f"PV: {len(pv_moves)} moves, checking until end of PV")
         
-        reason = self._lost_material(board_before, board, mover)
-        if reason:
-            reasons.append((2, reason))
-        
-        reason = self._bad_trade_exchange(board_before, move, mover)
-        if reason:
-            reasons.append((2, reason))
-        
-        reason = self._missed_winning_capture(board_before, mover)
-        if reason:
-            reasons.append((2, reason))
-        
-        # Priority 3: Tactical issues
-        reason = self._walked_into_knight_fork(board, mover)
-        if reason:
-            reasons.append((3, reason))
-        
-        reason = self._discovered_attack_allowed(board_before, board, mover)
-        if reason:
-            reasons.append((3, reason))
-        
-        reason = self._ignored_threat(board_before, board, eval_drop)
-        if reason:
-            reasons.append((3, reason))
-        
-        # Priority 4: King safety
-        reason = self._king_safety_worsened(board_before, board, mover)
-        if reason:
-            reasons.append((4, reason))
-        
-        reason = self._opened_king_lines(board_before, board, mover)
-        if reason:
-            reasons.append((4, reason))
-        
-        reason = self._back_rank_weakness(board, mover)
-        if reason:
-            reasons.append((4, reason))
-        
-        # Priority 5: Positional issues
-        reason = self._lost_center_control(board_before, board, mover)
-        if reason:
-            reasons.append((5, reason))
-        
-        reason = self._created_weak_square(board_before, board, mover)
-        if reason:
-            reasons.append((5, reason))
-        
-        # Priority 6: Endgame/Pawn issues
-        reason = self._endgame_pawn_mistake(board_before, board)
-        if reason:
-            reasons.append((6, reason))
-        
-        reason = self._passed_pawn_allowed(board_before, board, mover)
-        if reason:
-            reasons.append((6, reason))
-        
-        # Priority 7: Tempo/Opening issues (lowest priority)
-        reason = self._opening_principle_violation(board_before, move, board.fullmove_number)
-        if reason:
-            reasons.append((7, reason))
-        
-        # Choose best reason(s)
-        if reasons:
-            reasons.sort(key=lambda x: x[0])  # Sort by priority
-            headline = reasons[0][1]
-            details_list = [r[1] for r in reasons[1:3]]  # Up to 2 more details
-            
-            return {
-                'categories': [headline.get('category', 'General Mistake')],
-                'primary_category': headline.get('category', 'General Mistake'),
-                'details': {
-                    'headline': headline.get('message', ''),
-                    'detail': headline.get('detail', ''),
-                    'detail_lines': details_list
-                },
-                'eval_drop': eval_drop
-            }
+        # First, check at move 0.5 (position after the mistake)
+        print(f"[MISTAKE DEBUG] Checking at move 0.5 (position after mistake)")
+        print(f"  Board before mistake FEN: {board_before.fen()}")
+        print(f"  Board after mistake FEN: {temp_board.fen()}")
+        reason_0_5 = self._check_position_reasons(
+            board_before,  # Position BEFORE the mistake
+            temp_board,  # Position AFTER the mistake (move 0.5)
+            move,  # The mistake move
+            mistake_player,
+            eval_drop,
+            0  # Move 0 (immediately after mistake)
+        )
+        if reason_0_5 and reason_0_5.get('found_reason'):
+            reason_0_5['move_number'] = 0.5
+            all_reasons.append(reason_0_5)
+            debug_info_list.append(f"Move 0.5: ✓ {reason_0_5.get('primary_category', 'Issue')} - {reason_0_5.get('details', {}).get('headline', '')}")
         else:
-            # Fallback if no specific reason found
+            debug_info_list.append(f"Move 0.5: No significant reason")
+        
+        # Now step through all PV moves
+        ply_count = 0
+        for ply_num in range(len(pv_moves)):
+            pv_move = pv_moves[ply_num]
+            
+            # Apply the PV move
+            if pv_move not in temp_board.legal_moves:
+                print(f"[DEBUG] Ply {ply_num + 1}: Invalid move {pv_move.uci()}, stopping")
+                break
+            
+            try:
+                move_san = temp_board.san(pv_move)
+            except:
+                move_san = pv_move.uci()
+            
+            temp_board.push(pv_move)
+            ply_count += 1
+            
+            # Check at integer moves (1, 2, 3, etc.) - after full moves (both sides moved)
+            # After mistake: if White made mistake, Black moves first, then White
+            # Integer moves occur when ply_count is even (both sides have moved)
+            if ply_count % 2 == 0:  # After a full move (both sides moved)
+                full_move_num = ply_count // 2  # Integer move number (1, 2, 3, ...)
+                
+                print(f"[MISTAKE DEBUG] Checking at move {full_move_num}")
+                print(f"  Board before mistake FEN: {board_before.fen()}")
+                print(f"  Current board FEN: {temp_board.fen()}")
+                
+                # Check for significant reasons at this position
+                # Compare board_before (position BEFORE mistake) with temp_board (position after mistake + PV moves)
+                reason = self._check_position_reasons(
+                    board_before,  # Position BEFORE the mistake (what it should have been)
+                    temp_board,  # Current position (after mistake + PV moves)
+                    pv_move,  # The last move that was played
+                    mistake_player,  # The player who made the mistake
+                    eval_drop,
+                    full_move_num  # Full move number (1, 2, 3, ...)
+                )
+                
+                if reason and reason.get('found_reason'):
+                    reason['move_number'] = full_move_num
+                    all_reasons.append(reason)
+                    category = reason.get('primary_category', 'Unknown')
+                    headline = reason.get('details', {}).get('headline', 'No headline')
+                    debug_info_list.append(f"Move {full_move_num}: ✓ {category} - {headline}")
+                else:
+                    debug_info_list.append(f"Move {full_move_num}: No significant reason")
+        
+        debug_info_list.append(f"Checked entire PV ({ply_count} plies), found {len(all_reasons)} issue(s)")
+        
+        # Now prioritize: most valuable material loss > less valuable material loss > other issues
+        if all_reasons:
+            material_losses = []
+            other_reasons = []
+            
+            for reason in all_reasons:
+                if reason.get('primary_category') == 'Material Loss':
+                    # Get max_piece_value from the reason (set by _check_position_reasons)
+                    max_piece_value = reason.get('max_piece_value', 0)
+                    move_number = reason.get('move_number', 999)
+                    material_losses.append((max_piece_value, move_number, reason))
+                else:
+                    other_reasons.append(reason)
+            
+            # Sort material losses: first by piece value (descending), then by move number (ascending - earlier is worse)
+            material_losses.sort(key=lambda x: (-x[0], x[1]))
+            
+            # Select the most significant reason
+            if material_losses:
+                # Most valuable material loss is the primary reason
+                best_reason = material_losses[0][2]
+                best_reason['debug_info'] = debug_info_list
+                best_reason['all_reasons'] = all_reasons  # Store all reasons for reference
+                return best_reason
+            elif other_reasons:
+                # Use first other reason (checkmate, king safety, etc.)
+                # Prioritize checkmate > check > other issues
+                priority_order = {'Checkmate': 0, 'King Safety': 1}
+                other_reasons.sort(key=lambda r: priority_order.get(r.get('primary_category', ''), 999))
+                best_reason = other_reasons[0]
+                best_reason['debug_info'] = debug_info_list
+                best_reason['all_reasons'] = all_reasons
+                return best_reason
+        
+        # If no reasons found, return general explanation
+        result = {
+            'categories': ['Complex Mistake'],
+            'primary_category': 'Complex Mistake',
+            'details': {
+                'headline': f"Move worsened the position by {eval_drop/100.0:.2f} pawns",
+                'detail': f"The evaluation drop becomes clear after {ply_count // 2} move(s) in the continuation",
+                'detail_lines': []
+            },
+            'eval_drop': eval_drop,
+            'debug_info': debug_info_list,
+            'all_reasons': all_reasons
+        }
+        return result
+    
+    def _check_position_reasons(self, board_before: chess.Board, board_after: chess.Board, 
+                                move: chess.Move, mistake_player: bool, eval_drop: float, 
+                                move_num: int) -> Dict:
+        """
+        Check a prioritized list of reasons at a specific position.
+        Returns the first reason found, or None if no clear reason.
+        
+        Priority order:
+        1. Check/Mate
+        2. Piece drop (material loss)
+        3. Hanging piece
+        4. Tactical threat (fork, discovered attack)
+        5. King safety
+        6. Positional issues
+        """
+        opponent = not mistake_player
+        
+        # Priority 1: Check for checkmate
+        if board_after.is_checkmate():
+            try:
+                move_san = board_before.san(move) if move in board_before.legal_moves else move.uci()
+            except:
+                move_san = move.uci()
+            # Checkmate detected
             return {
-                'categories': ['General Mistake'],
-                'primary_category': 'General Mistake',
+                'found_reason': True,
+                'categories': ['Checkmate'],
+                'primary_category': 'Checkmate',
                 'details': {
-                    'headline': f"Move worsened the position by {eval_drop/100.0:.2f} pawns",
-                    'detail': '',
+                    'headline': f"You allowed checkmate.",
+                    'detail': f"After {move_num} move(s), opponent can deliver checkmate with {move_san}",
                     'detail_lines': []
                 },
                 'eval_drop': eval_drop
             }
+        
+        # Priority 2: Check for check
+        if board_after.is_check():
+            try:
+                move_san = board_before.san(move) if move in board_before.legal_moves else move.uci()
+            except:
+                move_san = move.uci()
+            king_sq = board_after.king(mistake_player)
+            if king_sq:
+                attackers = board_after.attackers(opponent, king_sq)
+                attacker_info = []
+                for attacker_sq in attackers:
+                    attacker_piece = board_after.piece_at(attacker_sq)
+                    if attacker_piece:
+                        attacker_name = chess.piece_name(attacker_piece.piece_type).capitalize()
+                        attacker_sq_name = chess.square_name(attacker_sq)
+                        attacker_info.append(f"{attacker_name} on {attacker_sq_name}")
+                
+                move_text = f"move {move_num}" if move_num > 0 else "the move"
+                detail_text = f"After {move_text}, your king is in check"
+                if attacker_info:
+                    detail_text += f" by {', '.join(attacker_info[:2])}"
+                
+                # King in check detected
+                return {
+                    'found_reason': True,
+                    'categories': ['King Safety'],
+                    'primary_category': 'King Safety',
+                    'details': {
+                        'headline': f"You left your king in check.",
+                        'detail': detail_text,
+                        'detail_lines': []
+                    },
+                    'eval_drop': eval_drop
+                }
+        
+        # Priority 3: Check for material loss (piece drop)
+        piece_values = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, 
+                       chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0}
+        
+        def material_count(board, color):
+            total = 0
+            piece_counts = {chess.PAWN: 0, chess.KNIGHT: 0, chess.BISHOP: 0, 
+                           chess.ROOK: 0, chess.QUEEN: 0, chess.KING: 0}
+            for square in chess.SQUARES:
+                piece = board.piece_at(square)
+                if piece and piece.color == color:
+                    piece_type = piece.piece_type
+                    value = piece_values.get(piece_type, 0)
+                    total += value
+                    if piece_type in piece_counts:
+                        piece_counts[piece_type] += 1
+            return total, piece_counts
+        
+        def get_piece_symbol(piece_type, color):
+            """Get the standard chess notation symbol for a piece."""
+            symbols = {
+                chess.PAWN: 'P',
+                chess.KNIGHT: 'N',
+                chess.BISHOP: 'B',
+                chess.ROOK: 'R',
+                chess.QUEEN: 'Q',
+                chess.KING: 'K'
+            }
+            symbol = symbols.get(piece_type, '?')
+            # For White, use uppercase; for Black, use lowercase
+            return symbol if color == chess.WHITE else symbol.lower()
+        
+        mat_before_tuple = material_count(board_before, mistake_player)
+        mat_after_tuple = material_count(board_after, mistake_player)
+        
+        # Handle both old format (single value) and new format (tuple)
+        if isinstance(mat_before_tuple, tuple):
+            mat_before, counts_before = mat_before_tuple
+        else:
+            mat_before = mat_before_tuple
+            counts_before = {}
+        
+        if isinstance(mat_after_tuple, tuple):
+            mat_after, counts_after = mat_after_tuple
+        else:
+            mat_after = mat_after_tuple
+            counts_after = {}
+        
+        # DEBUG: Print material values
+        print(f"[MATERIAL DEBUG] Move {move_num}:")
+        print(f"  Mistake player: {'White' if mistake_player else 'Black'}")
+        print(f"  Material BEFORE (position before mistake): {mat_before}")
+        if counts_before:
+            print(f"    Piece counts: P={counts_before.get(chess.PAWN, 0)}, N={counts_before.get(chess.KNIGHT, 0)}, B={counts_before.get(chess.BISHOP, 0)}, R={counts_before.get(chess.ROOK, 0)}, Q={counts_before.get(chess.QUEEN, 0)}, K={counts_before.get(chess.KING, 0)}")
+        print(f"  Material AFTER (current position): {mat_after}")
+        if counts_after:
+            print(f"    Piece counts: P={counts_after.get(chess.PAWN, 0)}, N={counts_after.get(chess.KNIGHT, 0)}, B={counts_after.get(chess.BISHOP, 0)}, R={counts_after.get(chess.ROOK, 0)}, Q={counts_after.get(chess.QUEEN, 0)}, K={counts_after.get(chess.KING, 0)}")
+        print(f"  Difference: {mat_before - mat_after}")
+        
+        if mat_after < mat_before:
+            # Material loss detected
+            lost_value = mat_before - mat_after
+            print(f"  ✓ Material loss detected: {lost_value} points")
+            
+            # Find which piece was lost
+            lost_pieces = []
+            max_piece_value = 0
+            for square in chess.SQUARES:
+                piece_before = board_before.piece_at(square)
+                piece_after = board_after.piece_at(square)
+                if piece_before and piece_before.color == mistake_player:
+                    if not piece_after or piece_after.color != mistake_player:
+                        piece_type = piece_before.piece_type
+                        piece_value = piece_values.get(piece_type, 0)
+                        max_piece_value = max(max_piece_value, piece_value)
+                        piece_symbol = get_piece_symbol(piece_type, mistake_player)
+                        square_name = chess.square_name(square)
+                        lost_pieces.append((piece_symbol, square_name, piece_type, piece_value))
+                        print(f"    - Lost {piece_symbol} on {square_name} (value: {piece_value})")
+            
+            print(f"  Max piece value lost: {max_piece_value}")
+            print(f"  Total lost pieces: {len(lost_pieces)}")
+            
+            # Format the explanation with piece symbols and locations
+            if lost_pieces:
+                # Sort by piece value (most valuable first)
+                lost_pieces.sort(key=lambda x: x[3], reverse=True)
+                
+                # Format: "Loses the N on e4 in 3 moves"
+                piece_info = []
+                for piece_symbol, square_name, _, _ in lost_pieces[:2]:  # Show up to 2 pieces
+                    piece_info.append(f"{piece_symbol} on {square_name}")
+                
+                move_text = f"in {move_num} move{'s' if move_num > 1 else ''}" if move_num > 0 else "immediately"
+                headline = f"Loses the {piece_info[0]} {move_text}"
+                
+                if len(lost_pieces) > 1:
+                    detail_text = f"Loses {', '.join(piece_info)} {move_text}"
+                else:
+                    detail_text = headline
+            else:
+                move_text = f"in {move_num} move{'s' if move_num > 1 else ''}" if move_num > 0 else "immediately"
+                headline = f"Loses material {move_text}"
+                detail_text = f"Material worth {lost_value:.1f} points is lost {move_text}"
+            
+            # Material loss found - include max_piece_value for prioritization
+            return {
+                'found_reason': True,
+                'categories': ['Material Loss'],
+                'primary_category': 'Material Loss',
+                'details': {
+                    'headline': headline,
+                    'detail': detail_text,
+                    'detail_lines': []
+                },
+                'eval_drop': eval_drop,
+                'max_piece_value': max_piece_value,  # Store for prioritization
+                'lost_value': lost_value
+            }
+        else:
+            print(f"  No material loss (material same or increased)")
+        
+        # Priority 4: Check for hanging piece (undefended and can be captured)
+        for square in chess.SQUARES:
+            piece = board_after.piece_at(square)
+            if piece and piece.color == mistake_player and piece.piece_type != chess.KING:
+                attackers = board_after.attackers(opponent, square)
+                defenders = board_after.attackers(mistake_player, square)
+                
+                if len(attackers) > 0 and len(defenders) == 0:
+                    piece_name = chess.piece_name(piece.piece_type).capitalize()
+                    square_name = chess.square_name(square)
+                    attacker_info = []
+                    for attacker_sq in attackers:
+                        attacker_piece = board_after.piece_at(attacker_sq)
+                        if attacker_piece:
+                            attacker_name = chess.piece_name(attacker_piece.piece_type).capitalize()
+                            attacker_info.append(attacker_name)
+                    
+                    move_text = f"move {move_num}" if move_num > 0 else "the move"
+                    detail_text = f"After {move_text}, {piece_name} on {square_name} is undefended"
+                    if attacker_info:
+                        detail_text += f" and can be captured by {', '.join(attacker_info[:2])}"
+                    
+                    return {
+                        'found_reason': True,
+                        'categories': ['Hanging Piece'],
+                        'primary_category': 'Hanging Piece',
+                        'details': {
+                            'headline': f"You left a piece undefended.",
+                            'detail': detail_text,
+                            'detail_lines': []
+                        },
+                        'eval_drop': eval_drop
+                    }
+        
+        # Priority 5: Check for tactical threats (fork, discovered attack)
+        # Check for knight fork
+        for square in chess.SQUARES:
+            piece = board_after.piece_at(square)
+            if piece and piece.piece_type == chess.KNIGHT and piece.color == opponent:
+                for knight_move in board_after.legal_moves:
+                    if knight_move.from_square == square:
+                        board_temp = board_after.copy()
+                        board_temp.push(knight_move)
+                        # Count high-value pieces attacked
+                        attacked_targets = []
+                        for target_sq in chess.SQUARES:
+                            target_piece = board_temp.piece_at(target_sq)
+                            if target_piece and target_piece.color == mistake_player:
+                                piece_values = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, 
+                                               chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 100}
+                                if piece_values.get(target_piece.piece_type, 0) >= 3:
+                                    if board_temp.attackers(opponent, target_sq):
+                                        attacked_targets.append((target_sq, target_piece))
+                        
+                        if len(attacked_targets) >= 2:
+                            try:
+                                move_san = board_after.san(knight_move)
+                            except:
+                                move_san = knight_move.uci()
+                            targets_str = ", ".join([chess.piece_name(p.piece_type).capitalize() + " on " + chess.square_name(sq) 
+                                                    for sq, p in attacked_targets[:2]])
+                            move_text = f"move {move_num}" if move_num > 0 else "the move"
+                            return {
+                                'found_reason': True,
+                                'categories': ['Tactical Blunder'],
+                                'primary_category': 'Tactical Blunder',
+                                'details': {
+                                    'headline': f"This move allows a fork.",
+                                    'detail': f"After {move_text}, opponent can fork {targets_str} with {move_san}",
+                                    'detail_lines': []
+                                },
+                                'eval_drop': eval_drop
+                            }
+        
+        # Priority 6: King safety (back rank, open lines)
+        king_sq = board_after.king(mistake_player)
+        if king_sq:
+            # Check back-rank weakness
+            king_rank = chess.square_rank(king_sq)
+            back_rank = 0 if mistake_player == chess.WHITE else 7
+            if king_rank == back_rank:
+                # Check if opponent has rook/queen on same rank
+                for square in chess.SQUARES:
+                    piece = board_after.piece_at(square)
+                    if piece and piece.color == opponent and piece.piece_type in [chess.ROOK, chess.QUEEN]:
+                        if chess.square_rank(square) == back_rank:
+                            move_text = f"move {move_num}" if move_num > 0 else "the move"
+                            return {
+                                'found_reason': True,
+                                'categories': ['King Safety'],
+                                'primary_category': 'King Safety',
+                                'details': {
+                                    'headline': f"You created back-rank weaknesses.",
+                                    'detail': f"After {move_text}, your king is trapped on the back rank with opponent's {chess.piece_name(piece.piece_type).capitalize()} nearby",
+                                    'detail_lines': []
+                                },
+                                'eval_drop': eval_drop
+                            }
+        
+        # No clear reason found at this position
+        return {'found_reason': False}
     
     # ========== Explainable Reason Detectors ==========
     
@@ -840,7 +1225,8 @@ class MistakeAnalyzer:
         return f"Move {move_san} shows poor endgame technique"
     
     def analyze_mistake_position(self, board: chess.Board, prev_eval: float, 
-                                 curr_eval: float, move: chess.Move, best_moves=None) -> Dict:
+                                 curr_eval: float, move: chess.Move, best_moves=None,
+                                 continuation_moves: Optional[List[Dict[str, Any]]] = None) -> Dict:
         """
         Complete analysis of a mistake position.
         
@@ -850,10 +1236,12 @@ class MistakeAnalyzer:
             curr_eval: Evaluation after the move (already calculated)
             move: The move that was played
             best_moves: Pre-calculated best moves (optional, to avoid re-analysis)
+            continuation_moves: PV from position after mistake (how opponent exploits it)
             
         Returns:
             Dictionary with complete mistake analysis
         """
+        print(f"[DEBUG] Analyzing mistake: {move.uci()}, eval drop: {(prev_eval - curr_eval)/100:.1f}", flush=True)
         # Use provided best moves if available, otherwise analyze
         if best_moves is None:
             analysis = self.analyze_position(board, time_limit=1.0)
@@ -863,8 +1251,17 @@ class MistakeAnalyzer:
         board_after = board.copy()
         board_after.push(move)
         
-        # Categorize the mistake (using board after to see consequences)
-        mistake_info = self.categorize_mistake(board_after, prev_eval, curr_eval, move)
+        # Use continuation_moves if provided, otherwise try to get from analyzing position after
+        if continuation_moves is None:
+            # Try to analyze position after to get continuation
+            try:
+                analysis_after = self.analyze_position(board_after, time_limit=0.5)
+                continuation_moves = analysis_after.get('best_moves', [])
+            except:
+                continuation_moves = []
+        
+        # Categorize the mistake using systematic PV analysis
+        mistake_info = self.categorize_mistake(board_after, prev_eval, curr_eval, move, board, continuation_moves)
         
         # Get move in SAN notation
         try:
@@ -872,7 +1269,7 @@ class MistakeAnalyzer:
         except:
             move_san = move.uci()
         
-        return {
+        result = {
             'position_fen': board.fen(),  # Position BEFORE mistake
             'position_after_fen': board_after.fen(),  # Position AFTER mistake
             'move_played': move.uci(),
@@ -886,3 +1283,18 @@ class MistakeAnalyzer:
             'best_moves': best_moves,  # Use provided best moves (from initial analysis)
             'position_eval': prev_eval  # Use provided eval (from initial analysis)
         }
+        
+        # Add debug info if available
+        if 'debug_info' in mistake_info:
+            result['debug_info'] = mistake_info['debug_info']
+            print(f"[DEBUG] Passing debug_info to result: {len(mistake_info['debug_info'])} items")
+            print(f"[DEBUG] First few items: {mistake_info['debug_info'][:3] if len(mistake_info['debug_info']) > 0 else 'empty'}")
+        else:
+            print(f"[DEBUG] No debug_info in mistake_info!")
+            print(f"[DEBUG] mistake_info keys: {list(mistake_info.keys())}")
+        
+        return result
+        
+        # Add debug info if available
+        if 'debug_info' in mistake_info:
+            result['debug_info'] = mistake_info['debug_info']
