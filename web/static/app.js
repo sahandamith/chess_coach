@@ -1047,6 +1047,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const boardInfo = document.createElement('div');
     boardInfo.className = 'board-info';
     boardInfo.id = boardId + '-info';
+    boardInfo.style.display = 'none';
     section.appendChild(boardInfo);
 
     const materialInfo = document.createElement('div');
