@@ -67,7 +67,8 @@ def _job_update_last_log(job_id: str, line: str) -> None:
             logs.append(line)
             return
         last = logs[-1]
-        if last.startswith("Analyzed move ") or last.startswith("Computing detail "):
+        if (last.startswith("Analyzed move ") or last.startswith("Computing detail ")
+                or last.startswith("Analyzing game ")):
             logs[-1] = line
         else:
             logs.append(line)
@@ -95,6 +96,48 @@ class _JobLogStream:
         if self._buf:
             _job_append_log(self.job_id, self._buf)
             self._buf = ""
+
+
+def _background_mistake_pv(job_id: str, engine_path: str) -> None:
+    """Compute mistake PV/evals in background and update job result in place (full quality)."""
+    engine = None
+    try:
+        engine = chess.engine.SimpleEngine.popen_uci(engine_path)
+        engine.configure({"Hash": 16})
+        with _ANALYSIS_JOBS_LOCK:
+            job = _ANALYSIS_JOBS.get(job_id)
+            if not job or job.get("status") != "done":
+                return
+            mistakes = (job.get("result") or {}).get("mistakes") or []
+        for i, m in enumerate(mistakes):
+            fen_before = m.get("position_before_fen")
+            fen_after = m.get("position_after_fen")
+            move_uci = m.get("move_played_uci") or ""
+            if not fen_before or not fen_after or not move_uci:
+                continue
+            try:
+                pv_data = compute_mistake_pv(
+                    engine, fen_before, fen_after, move_uci, time_limit=1.0
+                )
+                with _ANALYSIS_JOBS_LOCK:
+                    job = _ANALYSIS_JOBS.get(job_id)
+                    if not job or not job.get("result"):
+                        return
+                    mis = job["result"].get("mistakes")
+                    if mis and i < len(mis):
+                        mis[i]["continuation_moves"] = pv_data.get("continuation_moves")
+                        mis[i]["continuation_evals"] = pv_data.get("continuation_evals")
+                        mis[i]["best_moves"] = pv_data.get("best_moves")
+                        mis[i]["best_evals"] = pv_data.get("best_evals")
+                        mis[i]["start_eval"] = pv_data.get("start_eval")
+            except Exception:
+                pass
+    finally:
+        if engine is not None:
+            try:
+                engine.quit()
+            except Exception:
+                pass
 
 
 def _run_analysis_job(job_id: str, pgn_string: str) -> None:
@@ -125,27 +168,8 @@ def _run_analysis_job(job_id: str, pgn_string: str) -> None:
             analyzer.analyze_game()
             analyzer.analyze_mistakes()
 
-            # Populate mistake PV/evals so detail boards show evals (same as POST /api/analyze)
-            engine = analyzer.engine
+            # Return immediately with game + mistakes (no PV yet); PV computed in background
             mistake_list = analyzer.get_mistake_analyses()
-            total_mistakes = len(mistake_list)
-            for idx, m in enumerate(mistake_list):
-                print(f"Computing detail for mistake {idx + 1}/{total_mistakes}...", flush=True)
-                fen_before = m.get("position_before_fen")
-                fen_after = m.get("position_after_fen")
-                mp = m.get("move_played")
-                move_uci = mp.uci() if hasattr(mp, "uci") else (str(mp) if mp else "")
-                if fen_before and fen_after and move_uci:
-                    try:
-                        pv_data = compute_mistake_pv(engine, fen_before, fen_after, move_uci, time_limit=1.0)
-                        m["continuation_moves"] = pv_data.get("continuation_moves")
-                        m["continuation_evals"] = pv_data.get("continuation_evals")
-                        m["best_moves"] = pv_data.get("best_moves")
-                        m["best_evals"] = pv_data.get("best_evals")
-                        m["start_eval"] = pv_data.get("start_eval")
-                    except Exception as pv_err:
-                        print(f"Warning: mistake {idx + 1} PV failed: {pv_err}", flush=True)
-
             mistakes = [serialize_mistake(m) for m in mistake_list]
             results = analyzer.get_analysis_results()
             evals = []
@@ -177,6 +201,12 @@ def _run_analysis_job(job_id: str, pgn_string: str) -> None:
                     job["status"] = "done"
                     job["result"] = result_payload
                     job["finished_at"] = time.time()
+            # Compute mistake PVs in background (full quality); result is updated in place
+            threading.Thread(
+                target=_background_mistake_pv,
+                args=(job_id, engine_path),
+                daemon=True,
+            ).start()
         except Exception as e:
             with _ANALYSIS_JOBS_LOCK:
                 job = _ANALYSIS_JOBS.get(job_id)
@@ -374,13 +404,15 @@ def build_best_fens(mistake):
 
 def serialize_mistake(mistake):
     """Convert one mistake analysis to a JSON-safe dict."""
+    mp = mistake.get("move_played")
+    move_played_uci = mp.uci() if hasattr(mp, "uci") else (str(mp) if mp else "")
     out = {
         "position_index": mistake.get("position_index"),
         "chess_move": mistake.get("chess_move"),
         "severity": mistake.get("severity"),
         "phase": mistake.get("phase"),
-        "move_played": mistake.get("move_played"),
         "move_played_san": mistake.get("move_played_san"),
+        "move_played_uci": move_played_uci,
         "position_before_fen": mistake.get("position_before_fen"),
         "position_after_fen": mistake.get("position_after_fen"),
         "position_fen": mistake.get("position_fen"),
@@ -422,7 +454,7 @@ def compute_mistake_pv(engine, fen_before, fen_after, move_played_uci, time_limi
         getattr(move_played_uci, "uci", lambda: None)() or ""
     )
     try:
-        after_result = get_pv_from_fen(engine, fen_after, time_limit=time_limit)
+        after_result = get_pv_from_fen(engine, fen_after, time_limit=time_limit, min_depth=16)
         continuation_variation = []
         continuation_evals = []
         if move_uci:
@@ -584,7 +616,7 @@ async def analyze(request: AnalyzeRequest):
 
     engine_path = get_stockfish_path()
     try:
-        analyzer = ChessAnalyzer(engine_path, move_time_ms=400)
+        analyzer = ChessAnalyzer(engine_path, move_time_ms=200)
         analyzer.open_engine()
     except Exception as e:
         raise HTTPException(
@@ -615,7 +647,7 @@ async def analyze(request: AnalyzeRequest):
         mp = m.get("move_played")
         move_uci = mp.uci() if hasattr(mp, "uci") else (str(mp) if mp else "")
         if fen_before and fen_after and move_uci:
-            pv_data = compute_mistake_pv(engine, fen_before, fen_after, move_uci, time_limit=1.0)
+            pv_data = compute_mistake_pv(engine, fen_before, fen_after, move_uci, time_limit=0.5)
             m["continuation_moves"] = pv_data.get("continuation_moves")
             m["continuation_evals"] = pv_data.get("continuation_evals")
             m["best_moves"] = pv_data.get("best_moves")
@@ -671,7 +703,7 @@ async def analyze_mistake_fens(request: AnalyzeFensRequest):
         )
 
     try:
-        # 1. Mistake board: PV from FEN after mistake (longer time + depth for full line)
+        # 1. Mistake board: PV from FEN after mistake
         after_result = get_pv_from_fen(engine, request.fen_after_mistake, time_limit=1.0, min_depth=16)
         
         # Build continuation: mistake move first, then PV from after mistake
@@ -702,7 +734,7 @@ async def analyze_mistake_fens(request: AnalyzeFensRequest):
         continuation_variation.extend(after_result["variation"])
         continuation_evals.extend(after_result["evals"])
         
-        # 2. Best alternative board: PV from FEN before mistake (longer time + depth for full line)
+        # 2. Best alternative board: PV from FEN before mistake
         before_result = get_pv_from_fen(engine, request.fen_before_mistake, time_limit=1.0, min_depth=16)
         
         best_variation = before_result["variation"]

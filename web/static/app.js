@@ -15,6 +15,7 @@ window.startAnalyze = function () {
 };
 
 let currentAnalysisData = null;
+let currentJobId = null;
 let currentPgn = null;
 let flatMistakesList = null;
 let replayBoard = null;
@@ -334,6 +335,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
               }
               currentAnalysisData = data;
+              currentJobId = job_id;
               currentPgn = pgn;
               renderResult(data);
               return;
@@ -759,7 +761,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let bestMoves = mistake.best_moves || [];
     let startEval = mistake.start_eval != null ? mistake.start_eval : null;
 
-    const hasStoredPv = (continuationMoves[0] && continuationMoves[0].variation && continuationMoves[0].variation.length) ||
+    let hasStoredPv = (continuationMoves[0] && continuationMoves[0].variation && continuationMoves[0].variation.length) ||
       (bestMoves[0] && bestMoves[0].variation && bestMoves[0].variation.length);
     if (!hasStoredPv) view.appendChild(loadingDiv);
     details.appendChild(view);
@@ -768,8 +770,27 @@ document.addEventListener('DOMContentLoaded', () => {
     boardsContainer.className = 'boards-container';
 
     try {
-      if (!mistake.position_before_fen || !mistake.position_after_fen || !mistake.move_played) {
+      if (!mistake.position_before_fen || !mistake.position_after_fen) {
         throw new Error('Mistake data incomplete');
+      }
+
+      if (!hasStoredPv && currentJobId) {
+        try {
+          const jobResp = await fetch(`/api/analyze-job/${currentJobId}`);
+          const jobPayload = await jobResp.json();
+          if (jobPayload.result && jobPayload.result.mistakes && jobPayload.result.mistakes[mistakeIndex]) {
+            const updated = jobPayload.result.mistakes[mistakeIndex];
+            if (updated.continuation_evals && updated.continuation_evals.length) {
+              continuationEvals = updated.continuation_evals || [];
+              bestEvals = updated.best_evals || [];
+              continuationMoves = updated.continuation_moves || [];
+              bestMoves = updated.best_moves || [];
+              startEval = updated.start_eval != null ? updated.start_eval : null;
+              hasStoredPv = true;
+              currentAnalysisData = jobPayload.result;
+            }
+          }
+        } catch (e) { /* ignore */ }
       }
 
       if (!hasStoredPv) {
@@ -779,7 +800,7 @@ document.addEventListener('DOMContentLoaded', () => {
           body: JSON.stringify({
             fen_after_mistake: mistake.position_after_fen,
             fen_before_mistake: mistake.position_before_fen,
-            move_played_uci: mistake.move_played
+            move_played_uci: mistake.move_played_uci || ''
           }),
         });
         if (!resp.ok) {
