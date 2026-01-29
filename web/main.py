@@ -103,20 +103,26 @@ def _run_analysis_job(job_id: str, pgn_string: str) -> None:
 
             # Populate mistake PV/evals so detail boards show evals (same as POST /api/analyze)
             engine = analyzer.engine
-            for m in analyzer.get_mistake_analyses():
+            mistake_list = analyzer.get_mistake_analyses()
+            total_mistakes = len(mistake_list)
+            for idx, m in enumerate(mistake_list):
+                print(f"Computing detail for mistake {idx + 1}/{total_mistakes}...", flush=True)
                 fen_before = m.get("position_before_fen")
                 fen_after = m.get("position_after_fen")
                 mp = m.get("move_played")
                 move_uci = mp.uci() if hasattr(mp, "uci") else (str(mp) if mp else "")
                 if fen_before and fen_after and move_uci:
-                    pv_data = compute_mistake_pv(engine, fen_before, fen_after, move_uci, time_limit=0.5)
-                    m["continuation_moves"] = pv_data.get("continuation_moves")
-                    m["continuation_evals"] = pv_data.get("continuation_evals")
-                    m["best_moves"] = pv_data.get("best_moves")
-                    m["best_evals"] = pv_data.get("best_evals")
-                    m["start_eval"] = pv_data.get("start_eval")
+                    try:
+                        pv_data = compute_mistake_pv(engine, fen_before, fen_after, move_uci, time_limit=1.0)
+                        m["continuation_moves"] = pv_data.get("continuation_moves")
+                        m["continuation_evals"] = pv_data.get("continuation_evals")
+                        m["best_moves"] = pv_data.get("best_moves")
+                        m["best_evals"] = pv_data.get("best_evals")
+                        m["start_eval"] = pv_data.get("start_eval")
+                    except Exception as pv_err:
+                        print(f"Warning: mistake {idx + 1} PV failed: {pv_err}", flush=True)
 
-            mistakes = [serialize_mistake(m) for m in analyzer.get_mistake_analyses()]
+            mistakes = [serialize_mistake(m) for m in mistake_list]
             results = analyzer.get_analysis_results()
             evals = []
             for r in results:
@@ -233,14 +239,21 @@ def get_evals_for_fens(engine, fens, time_limit=0.15):
     return evals
 
 
-def get_pv_from_fen(engine, fen, time_limit=0.4):
-    """Analyze a FEN position and return PV moves with evals."""
+def get_pv_from_fen(engine, fen, time_limit=0.4, min_depth=0):
+    """Analyze a FEN position and return PV moves with evals.
+    Use min_depth > 0 (e.g. 14) to get longer PVs; engine stops when time or depth is reached.
+    """
     if not fen:
         return {"variation": [], "evals": []}
     
     try:
         board = chess.Board(fen)
-        info = engine.analyse(board, chess.engine.Limit(time=time_limit), multipv=1)
+        limit = (
+            chess.engine.Limit(time=time_limit, depth=min_depth)
+            if min_depth > 0
+            else chess.engine.Limit(time=time_limit)
+        )
+        info = engine.analyse(board, limit, multipv=1)
         info_list = info if isinstance(info, list) else [info]
         if not info_list or "pv" not in info_list[0] or len(info_list[0]["pv"]) == 0:
             return {"variation": [], "evals": []}
@@ -408,7 +421,7 @@ def compute_mistake_pv(engine, fen_before, fen_after, move_played_uci, time_limi
         continuation_variation.extend(after_result["variation"])
         continuation_evals.extend(after_result["evals"])
 
-        before_result = get_pv_from_fen(engine, fen_before, time_limit=time_limit)
+        before_result = get_pv_from_fen(engine, fen_before, time_limit=time_limit, min_depth=16)
         best_variation = before_result["variation"]
         best_evals = before_result["evals"]
 
@@ -578,7 +591,7 @@ async def analyze(request: AnalyzeRequest):
         mp = m.get("move_played")
         move_uci = mp.uci() if hasattr(mp, "uci") else (str(mp) if mp else "")
         if fen_before and fen_after and move_uci:
-            pv_data = compute_mistake_pv(engine, fen_before, fen_after, move_uci, time_limit=0.5)
+            pv_data = compute_mistake_pv(engine, fen_before, fen_after, move_uci, time_limit=1.0)
             m["continuation_moves"] = pv_data.get("continuation_moves")
             m["continuation_evals"] = pv_data.get("continuation_evals")
             m["best_moves"] = pv_data.get("best_moves")
@@ -634,8 +647,8 @@ async def analyze_mistake_fens(request: AnalyzeFensRequest):
         )
 
     try:
-        # 1. Mistake board: PV from FEN after mistake
-        after_result = get_pv_from_fen(engine, request.fen_after_mistake, time_limit=0.4)
+        # 1. Mistake board: PV from FEN after mistake (longer time + depth for full line)
+        after_result = get_pv_from_fen(engine, request.fen_after_mistake, time_limit=1.0, min_depth=16)
         
         # Build continuation: mistake move first, then PV from after mistake
         continuation_variation = []
@@ -665,8 +678,8 @@ async def analyze_mistake_fens(request: AnalyzeFensRequest):
         continuation_variation.extend(after_result["variation"])
         continuation_evals.extend(after_result["evals"])
         
-        # 2. Best alternative board: PV from FEN before mistake
-        before_result = get_pv_from_fen(engine, request.fen_before_mistake, time_limit=0.4)
+        # 2. Best alternative board: PV from FEN before mistake (longer time + depth for full line)
+        before_result = get_pv_from_fen(engine, request.fen_before_mistake, time_limit=1.0, min_depth=16)
         
         best_variation = before_result["variation"]
         best_evals = before_result["evals"]

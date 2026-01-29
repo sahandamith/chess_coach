@@ -286,8 +286,18 @@ document.addEventListener('DOMContentLoaded', () => {
         const analyzingMistakes = logs.some(l => l.indexOf('Analyzing mistakes') !== -1);
         const complete = logs.some(l => l.indexOf('Analysis complete') !== -1);
         const foundMistakes = logs.find(l => /Found \d+ mistakes?\./.test(l));
+        const detailProgress = (() => {
+          for (let i = logs.length - 1; i >= 0; i--) {
+            const match = logs[i].match(/Computing detail for mistake (\d+)\/(\d+)/);
+            if (match) return { current: parseInt(match[1], 10), total: parseInt(match[2], 10) };
+          }
+          return null;
+        })();
         let text = '';
-        if (lastMoveProgress) {
+        if (detailProgress) {
+          text = `Computing detail for mistake ${detailProgress.current} of ${detailProgress.total}`;
+          if (foundMistakes) text += '\n' + foundMistakes.trim();
+        } else if (lastMoveProgress) {
           text = `Analyzing moves: ${lastMoveProgress.current} of ${lastMoveProgress.total}`;
           if (analyzingMistakes) text += '\nAnalyzing mistakes...';
           else if (complete) text += '\nAnalysis complete.';
