@@ -101,6 +101,21 @@ def _run_analysis_job(job_id: str, pgn_string: str) -> None:
             analyzer.analyze_game()
             analyzer.analyze_mistakes()
 
+            # Populate mistake PV/evals so detail boards show evals (same as POST /api/analyze)
+            engine = analyzer.engine
+            for m in analyzer.get_mistake_analyses():
+                fen_before = m.get("position_before_fen")
+                fen_after = m.get("position_after_fen")
+                mp = m.get("move_played")
+                move_uci = mp.uci() if hasattr(mp, "uci") else (str(mp) if mp else "")
+                if fen_before and fen_after and move_uci:
+                    pv_data = compute_mistake_pv(engine, fen_before, fen_after, move_uci, time_limit=0.5)
+                    m["continuation_moves"] = pv_data.get("continuation_moves")
+                    m["continuation_evals"] = pv_data.get("continuation_evals")
+                    m["best_moves"] = pv_data.get("best_moves")
+                    m["best_evals"] = pv_data.get("best_evals")
+                    m["start_eval"] = pv_data.get("start_eval")
+
             mistakes = [serialize_mistake(m) for m in analyzer.get_mistake_analyses()]
             results = analyzer.get_analysis_results()
             evals = []

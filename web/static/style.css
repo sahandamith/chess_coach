@@ -148,8 +148,8 @@ pre {
 }
 
 .replay-left {
-  width: 400px;
-  flex: 0 0 400px;
+  width: 260px;
+  flex: 0 0 260px;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -217,19 +217,18 @@ pre {
   min-height: 0;
 }
 
-/* Enlarged replay move list so white and black moves are fully visible */
 .replay-moves-section-compact .pv-move {
-  padding: 0.3rem 0.4rem;
-  font-size: 0.92rem;
+  padding: 0.2rem 0.3rem;
+  font-size: 0.82rem;
 }
 
 .replay-moves-section-compact .moves-row {
-  grid-template-columns: 2.5rem 1fr 1fr;
-  gap: 0.5rem;
+  grid-template-columns: 2rem 1fr 1fr;
+  gap: 0.35rem;
 }
 
 .replay-moves-section-compact .move-blank {
-  height: 1.4rem;
+  height: 1.2rem;
 }
 
 /* Ensure replay board renders exactly 460x460 like other boards */
