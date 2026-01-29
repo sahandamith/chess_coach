@@ -494,13 +494,28 @@ document.addEventListener('DOMContentLoaded', () => {
       const pawns = (cp / 100).toFixed(1);
       ctx.fillText((cp >= 0 ? '+' : '') + pawns, padding - 6, y + 4);
     }
+    ctx.save();
+    ctx.translate(14, height / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = 'center';
+    ctx.fillText('Eval (pawns)', 0, 0);
+    ctx.restore();
 
-    ctx.fillStyle = '#b2bec3';
+    const xTickStep = Math.max(1, Math.floor(total / 15));
+    ctx.textAlign = 'center';
+    ctx.font = '10px sans-serif';
+    for (let i = 0; i < total; i += xTickStep) {
+      const x = idxToX(i);
+      const moveNum = Math.floor(i / 2);
+      ctx.fillText(String(moveNum), x, height - padding + 14);
+    }
+    ctx.fillText('Move', width / 2, height - 4);
+
     ctx.font = '10px sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('Opening', padding + (idxToX(move15Idx) - padding) / 2, height - 6);
-    ctx.fillText('Middlegame', idxToX(move15Idx) + (idxToX(move30Idx) - idxToX(move15Idx)) / 2, height - 6);
-    ctx.fillText('Endgame', idxToX(move30Idx) + (width - padding - idxToX(move30Idx)) / 2, height - 6);
+    ctx.fillText('Opening', padding + (idxToX(move15Idx) - padding) / 2, height - 22);
+    ctx.fillText('Middlegame', idxToX(move15Idx) + (idxToX(move30Idx) - idxToX(move15Idx)) / 2, height - 22);
+    ctx.fillText('Endgame', idxToX(move30Idx) + (width - padding - idxToX(move30Idx)) / 2, height - 22);
 
     const legX = width - 130;
     const legY = padding + 6;
@@ -653,48 +668,53 @@ document.addEventListener('DOMContentLoaded', () => {
     const view = document.createElement('div');
     view.className = 'mistake-view';
 
-    // Show loading state
     const loadingDiv = document.createElement('div');
     loadingDiv.style.padding = '1rem';
     loadingDiv.style.textAlign = 'center';
     loadingDiv.textContent = 'Analyzing mistake with Stockfish...';
-    view.appendChild(loadingDiv);
+
+    let continuationEvals = mistake.continuation_evals || [];
+    let bestEvals = mistake.best_evals || [];
+    let continuationMoves = mistake.continuation_moves || [];
+    let bestMoves = mistake.best_moves || [];
+    let startEval = mistake.start_eval != null ? mistake.start_eval : null;
+
+    const hasStoredPv = (continuationMoves[0] && continuationMoves[0].variation && continuationMoves[0].variation.length) ||
+      (bestMoves[0] && bestMoves[0].variation && bestMoves[0].variation.length);
+    if (!hasStoredPv) view.appendChild(loadingDiv);
     details.appendChild(view);
 
-    // Two boards container (will be populated after analysis)
     const boardsContainer = document.createElement('div');
     boardsContainer.className = 'boards-container';
 
     try {
-      // Call the new endpoint to analyze only the specific FENs (much faster!)
       if (!mistake.position_before_fen || !mistake.position_after_fen || !mistake.move_played) {
         throw new Error('Mistake data incomplete');
       }
 
-      const resp = await fetch('/api/analyze-mistake-fens', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fen_after_mistake: mistake.position_after_fen,
-          fen_before_mistake: mistake.position_before_fen,
-          move_played_uci: mistake.move_played
-        }),
-      });
-
-      if (!resp.ok) {
-        const errorData = await resp.json().catch(() => ({}));
-        throw new Error(errorData.detail || resp.statusText);
+      if (!hasStoredPv) {
+        const resp = await fetch('/api/analyze-mistake-fens', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fen_after_mistake: mistake.position_after_fen,
+            fen_before_mistake: mistake.position_before_fen,
+            move_played_uci: mistake.move_played
+          }),
+        });
+        if (!resp.ok) {
+          const errorData = await resp.json().catch(() => ({}));
+          throw new Error(errorData.detail || resp.statusText);
+        }
+        const analysisData = await resp.json();
+        continuationEvals = analysisData.continuation_evals || [];
+        bestEvals = analysisData.best_evals || [];
+        continuationMoves = analysisData.continuation_moves || [];
+        bestMoves = analysisData.best_moves || [];
+        startEval = analysisData.start_eval != null ? analysisData.start_eval : null;
       }
 
-      const analysisData = await resp.json();
-      const continuationEvals = analysisData.continuation_evals || [];
-      const bestEvals = analysisData.best_evals || [];
-      const continuationMoves = analysisData.continuation_moves || [];
-      const bestMoves = analysisData.best_moves || [];
-      const startEval = analysisData.start_eval || null;
-
-      // Remove loading state
-      loadingDiv.remove();
+      if (loadingDiv.parentNode) loadingDiv.remove();
 
       // Left board: Mistake continuation
       // The continuationMoves from backend already includes the mistake move as first move
@@ -727,7 +747,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
       view.appendChild(boardsContainer);
       
-      // Add eval plot at the bottom
       const plotContainer = document.createElement('div');
       plotContainer.style.marginTop = '2rem';
       plotContainer.style.padding = '1rem';
@@ -748,23 +767,7 @@ document.addEventListener('DOMContentLoaded', () => {
       canvas.style.height = 'auto';
       plotContainer.appendChild(canvas);
 
-      // Actual game evals from this mistake onward (plot starts at mistake)
-      let actualEvals = [];
-      if (currentAnalysisData && currentAnalysisData.positions && mistake.position_after_fen) {
-        const positions = currentAnalysisData.positions;
-        const afterFen = (mistake.position_after_fen || '').trim();
-        let mistakeIdx = typeof mistake.position_index === 'number' ? mistake.position_index : -1;
-        if (mistakeIdx < 0 && afterFen) {
-          const i = positions.findIndex((p) => (p && p.fen || '').trim() === afterFen);
-          if (i >= 0) mistakeIdx = i;
-        }
-        if (mistakeIdx >= 0) {
-          actualEvals = positions.slice(mistakeIdx).map((p) => (p && p.eval != null) ? p.eval : null).filter((e) => e != null);
-        }
-      }
-      
-      // Draw eval plot (all curves start from mistake; y-axis -8 to +8 pawns)
-      drawEvalPlot(canvas, startEval, continuationEvals, bestEvals, actualEvals);
+      drawEvalPlot(canvas, startEval, continuationEvals, bestEvals);
       
       view.appendChild(plotContainer);
     } catch (error) {
@@ -787,7 +790,7 @@ document.addEventListener('DOMContentLoaded', () => {
     return { x, y };
   }
 
-  function drawEvalPlot(canvas, startEval, continuationEvals, bestEvals, actualEvals) {
+  function drawEvalPlot(canvas, startEval, continuationEvals, bestEvals) {
     const ctx = canvas.getContext('2d');
     const width = canvas.width;
     const height = canvas.height;
@@ -795,16 +798,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const plotWidth = width - 2 * padding;
     const plotHeight = height - 2 * padding;
     
-    // Clear canvas (dark theme)
     ctx.fillStyle = '#2f3640';
     ctx.fillRect(0, 0, width, height);
     
-    // All curves start from the mistake (x=0 = after mistake); fixed y range -8 to +8 pawns
     const continuationData = (continuationEvals || []).filter(e => e != null);
     const bestData = (bestEvals || []).filter(e => e != null);
-    const actualData = (actualEvals || []).filter(e => e != null);
     
-    if (continuationData.length === 0 && bestData.length === 0 && actualData.length === 0) return;
+    if (continuationData.length === 0 && bestData.length === 0) return;
     
     const yMin = -800;
     const yMax = 800;
@@ -816,7 +816,7 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     
     const indexToX = (idx, total) => padding + (idx / Math.max(total - 1, 1)) * plotWidth;
-    const maxPoints = Math.max(continuationData.length, bestData.length, actualData.length, 1);
+    const maxPoints = Math.max(continuationData.length, bestData.length, 1);
     
     // Draw grid lines
     ctx.strokeStyle = '#2d3436';
@@ -891,28 +891,6 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     }
 
-    // Actual game line (from mistake onward)
-    if (actualData.length > 0) {
-      ctx.strokeStyle = '#ffeaa7';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      for (let i = 0; i < actualData.length; i++) {
-        const x = indexToX(i, maxPoints);
-        const y = evalToY(actualData[i]);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
-      ctx.stroke();
-      ctx.fillStyle = '#ffeaa7';
-      for (let i = 0; i < actualData.length; i++) {
-        const x = indexToX(i, maxPoints);
-        const y = evalToY(actualData[i]);
-        ctx.beginPath();
-        ctx.arc(x, y, 4, 0, 2 * Math.PI);
-        ctx.fill();
-      }
-    }
-    
     // X-axis tick values (move indices)
     const xTickStep = maxPoints <= 5 ? 1 : Math.ceil(maxPoints / 5);
     ctx.fillStyle = '#b2bec3';

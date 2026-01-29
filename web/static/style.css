@@ -148,34 +148,20 @@ pre {
 }
 
 .replay-left {
-  width: 360px;
-  flex: 0 0 360px;
+  width: 260px;
+  flex: 0 0 260px;
 }
 
 .replay-center {
   flex: 0 0 auto;
-  margin-left: 0.5rem;
 }
 
 .replay-right {
-  width: 320px;
-  flex: 0 0 320px;
+  width: 380px;
+  flex: 0 0 380px;
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
-}
-
-.replay-eval-plot-wrap {
-  width: 100%;
-  margin-top: 1.5rem;
-  padding-top: 1rem;
-  border-top: 1px solid rgba(255,255,255,0.08);
-}
-
-.replay-eval-plot-wrap canvas {
-  display: block;
-  max-width: 100%;
-  height: auto;
 }
 
 @media (max-width: 1180px) {
@@ -217,19 +203,20 @@ pre {
 }
 
 .replay-moves-section-compact .replay-moves-list {
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   margin-top: 0;
 }
 
-/* Enlarged replay move list */
+/* Make replay move list denser */
 .replay-moves-section-compact .pv-move {
-  padding: 0.35rem 0.5rem;
-  font-size: 0.95rem;
+  padding: 0.15rem 0.3rem;
+  font-size: 0.8rem;
 }
 
 .replay-moves-section-compact .moves-row {
-  grid-template-columns: 2.5rem 1fr 1fr;
-  gap: 0.4rem;
+  grid-template-columns: 2.2rem 1fr 1fr;
+  gap: 0.3rem;
 }
 
 .replay-moves-section-compact .move-blank {
@@ -325,7 +312,6 @@ pre {
 }
 
 .replay-info {
-  display: none;
   margin: 0.5rem 0;
   font-size: 1rem;
   color: #ffeaa7;

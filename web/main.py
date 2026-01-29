@@ -11,8 +11,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-# Run from web/ (Render) so we can import chess_engine from web/chess_engine
-ROOT = os.path.dirname(os.path.abspath(__file__))
+# Run from repo root so we can import chess_engine
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
@@ -154,7 +154,12 @@ def _run_analysis_job(job_id: str, pgn_string: str) -> None:
 
 
 def get_stockfish_path():
-    """Resolve Stockfish executable path. Use STOCKFISH_PATH on Render."""
+    """Resolve Stockfish executable path (use your local path)."""
+    # Reuse your original local Stockfish path for development
+    path = r"C:\Users\sahan\Downloads\stockfish-windows-x86-64-avx2\stockfish\stockfish-windows-x86-64-avx2.exe"
+    if path and os.path.isfile(path):
+        return path
+    # Fallback to environment or PATH if needed
     env_path = os.environ.get("STOCKFISH_PATH")
     if env_path and os.path.isfile(env_path):
         return env_path
@@ -213,21 +218,17 @@ def get_evals_for_fens(engine, fens, time_limit=0.15):
     return evals
 
 
-def get_pv_from_fen(engine, fen, time_limit=0.4, depth_limit=None):
+def get_pv_from_fen(engine, fen, time_limit=0.4):
     """Analyze a FEN position and return PV moves with evals."""
     if not fen:
         return {"variation": [], "evals": []}
     
     try:
         board = chess.Board(fen)
-        limit = chess.engine.Limit(time=time_limit)
-        if depth_limit is not None:
-            limit = chess.engine.Limit(time=time_limit, depth=depth_limit)
-        info = engine.analyse(board, limit, multipv=1)
+        info = engine.analyse(board, chess.engine.Limit(time=time_limit), multipv=1)
         info_list = info if isinstance(info, list) else [info]
         if not info_list or "pv" not in info_list[0] or len(info_list[0]["pv"]) == 0:
             return {"variation": [], "evals": []}
-        
         pv_moves = info_list[0]["pv"]
         variation = []
         fens = []
@@ -346,7 +347,82 @@ def serialize_mistake(mistake):
         out["continuation_evals"] = mistake["continuation_evals"]
     if mistake.get("best_evals") is not None:
         out["best_evals"] = mistake["best_evals"]
+    if mistake.get("start_eval") is not None:
+        out["start_eval"] = mistake["start_eval"]
     return out
+
+
+def compute_mistake_pv(engine, fen_before, fen_after, move_played_uci, time_limit=0.5):
+    """
+    Compute continuation and best PV for one mistake. Used during first analysis
+    so mistake detail can show boards immediately when user clicks.
+    Returns dict with continuation_moves, continuation_evals, best_moves, best_evals, start_eval.
+    """
+    if not fen_before or not fen_after:
+        return {
+            "continuation_moves": [{"variation": []}],
+            "continuation_evals": [],
+            "best_moves": [{"variation": []}],
+            "best_evals": [],
+            "start_eval": None,
+        }
+    move_uci = (move_played_uci or "").strip() if isinstance(move_played_uci, str) else (
+        getattr(move_played_uci, "uci", lambda: None)() or ""
+    )
+    try:
+        after_result = get_pv_from_fen(engine, fen_after, time_limit=time_limit)
+        continuation_variation = []
+        continuation_evals = []
+        if move_uci:
+            try:
+                board_before = chess.Board(fen_before)
+                move = chess.Move.from_uci(move_uci)
+                if move in board_before.legal_moves:
+                    continuation_variation.append({
+                        "move": move_uci,
+                        "move_uci": move_uci,
+                        "move_san": board_before.san(move)
+                    })
+                    board_after = chess.Board(fen_after)
+                    info = engine.analyse(board_after, chess.engine.Limit(time=0.15))
+                    info_one = info[0] if isinstance(info, list) else info
+                    score = info_one["score"].white().score(mate_score=10000)
+                    continuation_evals.append(score if score is not None else None)
+            except Exception:
+                pass
+        continuation_variation.extend(after_result["variation"])
+        continuation_evals.extend(after_result["evals"])
+
+        before_result = get_pv_from_fen(engine, fen_before, time_limit=time_limit)
+        best_variation = before_result["variation"]
+        best_evals = before_result["evals"]
+
+        start_eval = None
+        try:
+            board_start = chess.Board(fen_before)
+            info_start = engine.analyse(board_start, chess.engine.Limit(time=0.15))
+            info_one = info_start[0] if isinstance(info_start, list) else info_start
+            score_start = info_one["score"].white().score(mate_score=10000)
+            start_eval = score_start if score_start is not None else None
+        except Exception:
+            pass
+
+        return {
+            "continuation_moves": [{"variation": continuation_variation}],
+            "continuation_evals": continuation_evals,
+            "best_moves": [{"variation": best_variation}],
+            "best_evals": best_evals,
+            "start_eval": start_eval,
+        }
+    except Exception as e:
+        print(f"compute_mistake_pv error: {e}")
+        return {
+            "continuation_moves": [{"variation": []}],
+            "continuation_evals": [],
+            "best_moves": [{"variation": []}],
+            "best_evals": [],
+            "start_eval": None,
+        }
 
 
 class AnalyzeRequest(BaseModel):
@@ -472,9 +548,21 @@ async def analyze(request: AnalyzeRequest):
             pass
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
-    # Don't analyze mistake/best lines upfront - do it on demand when mistake is clicked
-    # This saves time and resources since users may not review all mistakes
-    mistakes = [serialize_mistake(m) for m in analyzer.get_mistake_analyses()]
+    mistake_analyses = analyzer.get_mistake_analyses()
+    engine = analyzer.engine
+    for m in mistake_analyses:
+        fen_before = m.get("position_before_fen")
+        fen_after = m.get("position_after_fen")
+        mp = m.get("move_played")
+        move_uci = mp.uci() if hasattr(mp, "uci") else (str(mp) if mp else "")
+        if fen_before and fen_after and move_uci:
+            pv_data = compute_mistake_pv(engine, fen_before, fen_after, move_uci, time_limit=0.5)
+            m["continuation_moves"] = pv_data.get("continuation_moves")
+            m["continuation_evals"] = pv_data.get("continuation_evals")
+            m["best_moves"] = pv_data.get("best_moves")
+            m["best_evals"] = pv_data.get("best_evals")
+            m["start_eval"] = pv_data.get("start_eval")
+    mistakes = [serialize_mistake(m) for m in mistake_analyses]
     results = analyzer.get_analysis_results()
     evals = []
     for r in results:
@@ -524,10 +612,8 @@ async def analyze_mistake_fens(request: AnalyzeFensRequest):
         )
 
     try:
-        # 1. Mistake board: PV from FEN after mistake (depth for full PV line)
-        after_result = get_pv_from_fen(
-            engine, request.fen_after_mistake, time_limit=0.9, depth_limit=22
-        )
+        # 1. Mistake board: PV from FEN after mistake
+        after_result = get_pv_from_fen(engine, request.fen_after_mistake, time_limit=0.4)
         
         # Build continuation: mistake move first, then PV from after mistake
         continuation_variation = []
@@ -557,10 +643,8 @@ async def analyze_mistake_fens(request: AnalyzeFensRequest):
         continuation_variation.extend(after_result["variation"])
         continuation_evals.extend(after_result["evals"])
         
-        # 2. Best alternative board: PV from FEN before mistake (depth for full PV)
-        before_result = get_pv_from_fen(
-            engine, request.fen_before_mistake, time_limit=0.9, depth_limit=22
-        )
+        # 2. Best alternative board: PV from FEN before mistake
+        before_result = get_pv_from_fen(engine, request.fen_before_mistake, time_limit=0.4)
         
         best_variation = before_result["variation"]
         best_evals = before_result["evals"]
