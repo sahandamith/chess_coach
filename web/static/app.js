@@ -98,13 +98,21 @@ document.addEventListener('DOMContentLoaded', () => {
   function updateReplayInfo() {
     const { fens, positions, index } = replayState;
     if (!fens.length) return;
-    const totalMoves = fens.length - 1; // Total plies (excluding start position)
     const replayPvMovesEl = document.getElementById('replay-pv-moves');
-    
-    // Update clickable moves list - start with first move (1. white black), no "Start" chip
+
+    // Backend sends positions[0]=start (no move), positions[1]=after white's 1st, positions[2]=after black's 1st, ...
+    if (positions.length > 1 && positions[1] && positions[1].fen && (!positions[1].move_san || !positions[1].move_san.trim()) && positions[1].move_uci) {
+      try {
+        const c = new Chess();
+        c.load(positions[0] && positions[0].fen ? positions[0].fen : START_FEN);
+        const mv = applyUci(c, positions[1].move_uci);
+        if (mv && mv.san) positions[1].move_san = mv.san;
+      } catch (e) { /* ignore */ }
+    }
+
+    // Move list: row 1 = positions[1] (white), positions[2] (black); row 2 = [3],[4]; ...
     if (replayPvMovesEl) {
       replayPvMovesEl.innerHTML = '';
-
       const cols = document.createElement('div');
       cols.className = 'moves-columns';
       const left = document.createElement('div');
@@ -114,22 +122,30 @@ document.addEventListener('DOMContentLoaded', () => {
       cols.appendChild(left);
       cols.appendChild(right);
 
-      const fullMoves = Math.ceil(positions.length / 2);
+      const fullMoves = Math.floor((positions.length - 1) / 2);
       for (let m = 0; m < fullMoves; m++) {
         const row = document.createElement('div');
         row.className = 'moves-row';
-
         const numSpan = document.createElement('span');
         numSpan.className = 'move-num';
         numSpan.textContent = String(m + 1) + '.';
         row.appendChild(numSpan);
 
-        const whitePos = positions[m * 2];
-        const blackPos = positions[m * 2 + 1];
+        const whitePos = positions[2 * m + 1];
+        const blackPos = positions[2 * m + 2];
 
         if (whitePos) {
-          const whiteMoveIdx = m * 2 + 1; // Index in fens array
-          const whiteMoveSan = whitePos.move_san || (whitePos.move_uci ? String(whitePos.move_uci) : '');
+          const whiteMoveIdx = 2 * m + 1;
+          let whiteMoveSan = whitePos.move_san || (whitePos.move_uci ? String(whitePos.move_uci) : '');
+          if ((!whiteMoveSan || !whiteMoveSan.trim()) && whitePos.move_uci) {
+            try {
+              const c = new Chess();
+              c.load(positions[0] && positions[0].fen ? positions[0].fen : START_FEN);
+              for (let i = 0; i < 2 * m; i++) applyUci(c, positions[i + 1].move_uci);
+              const mv = applyUci(c, whitePos.move_uci);
+              if (mv && mv.san) whiteMoveSan = mv.san;
+            } catch (e) { /* ignore */ }
+          }
           if (whiteMoveSan && whiteMoveSan.trim()) {
             const whiteSpan = document.createElement('span');
             whiteSpan.className = 'pv-move move-white' + (whiteMoveIdx === index ? ' current' : '');
@@ -153,8 +169,17 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (blackPos) {
-          const blackMoveIdx = m * 2 + 2;
-          const blackMoveSan = blackPos.move_san || (blackPos.move_uci ? String(blackPos.move_uci) : '');
+          const blackMoveIdx = 2 * m + 2;
+          let blackMoveSan = blackPos.move_san || (blackPos.move_uci ? String(blackPos.move_uci) : '');
+          if ((!blackMoveSan || !blackMoveSan.trim()) && blackPos.move_uci) {
+            try {
+              const c = new Chess();
+              c.load(positions[0] && positions[0].fen ? positions[0].fen : START_FEN);
+              for (let i = 0; i < 2 * m + 1; i++) applyUci(c, positions[i + 1].move_uci);
+              const mv = applyUci(c, blackPos.move_uci);
+              if (mv && mv.san) blackMoveSan = mv.san;
+            } catch (e) { /* ignore */ }
+          }
           if (blackMoveSan && blackMoveSan.trim()) {
             const blackSpan = document.createElement('span');
             blackSpan.className = 'pv-move move-black' + (blackMoveIdx === index ? ' current' : '');
@@ -177,50 +202,20 @@ document.addEventListener('DOMContentLoaded', () => {
           row.appendChild(blank);
         }
 
-        // left column gets 1,3,5... (m=0,2,4...), right gets 2,4,6... (m=1,3,5...)
         (m % 2 === 0 ? left : right).appendChild(row);
       }
-
       replayPvMovesEl.appendChild(cols);
     }
-    
-    if (index === 0) {
-      replayInfoEl.textContent = 'Initial position';
-      setEvalBar(document.getElementById('replay-eval-bar-wrap'), null);
-    } else {
-      // Format move display: pair white and black moves together
-      let moveText = '';
-      const currentPos = positions[index - 1];
-      const evalStr = currentPos && currentPos.eval != null ? `  •  eval: ${formatEval(currentPos.eval)}` : '';
-      
-      if (index % 2 === 1) {
-        // After white's move only - show just white move
-        // Index 1 -> Move 0.5, Index 3 -> Move 1.5, etc.
-        const whiteMoveNum = (index - 1) / 2 + 0.5;
-        const whiteMoveLabel = currentPos && currentPos.move_san ? currentPos.move_san : `Move ${whiteMoveNum.toFixed(1)}`;
-        moveText = `Move ${whiteMoveNum.toFixed(1)}/${totalMoves / 2}: ${whiteMoveLabel}`;
-      } else {
-        // After black's move - show both white and black moves
-        // Index 2 -> Move 0.5 and Move 1, Index 4 -> Move 1.5 and Move 2, etc.
-        const whiteMoveNum = (index - 2) / 2 + 0.5;
-        const blackMoveNum = index / 2;
-        const whitePos = index > 1 ? positions[index - 2] : null;
-        const blackPos = currentPos;
-        const whiteMoveLabel = whitePos && whitePos.move_san ? whitePos.move_san : `Move ${whiteMoveNum.toFixed(1)}`;
-        const blackMoveLabel = blackPos && blackPos.move_san ? blackPos.move_san : `Move ${blackMoveNum}`;
-        moveText = `Move ${whiteMoveNum.toFixed(1)}/${totalMoves / 2}: ${whiteMoveLabel}, Move ${blackMoveNum}/${totalMoves / 2}: ${blackMoveLabel}`;
-      }
-      
-      replayInfoEl.textContent = moveText + evalStr;
-      setEvalBar(document.getElementById('replay-eval-bar-wrap'), currentPos && currentPos.eval != null ? currentPos.eval : null);
-    }
+
+    const currentPos = positions[index];
+    setEvalBar(document.getElementById('replay-eval-bar-wrap'), currentPos && currentPos.eval != null ? currentPos.eval : null);
     if (replayPrevBtn) replayPrevBtn.disabled = index <= 0;
     if (replayNextBtn) replayNextBtn.disabled = index >= fens.length - 1;
 
-    // Update replay eval plot (whole game) + current move marker
     const plotCanvas = document.getElementById('replay-eval-plot');
     if (plotCanvas && replayAllEvals && Array.isArray(replayAllEvals)) {
-      drawSingleEvalPlot(plotCanvas, replayAllEvals, index);
+      const mistakes = (currentAnalysisData && currentAnalysisData.mistakes) || [];
+      drawSingleEvalPlot(plotCanvas, replayAllEvals, index, mistakes);
     }
   }
 
@@ -325,11 +320,10 @@ document.addEventListener('DOMContentLoaded', () => {
       // Non-fatal; fallback to server-provided move_san
     }
 
-    // Build replay - include all positions from the game
+    // Build replay - backend sends positions[0]=start, positions[1]=after move 1, ...
     if (positions.length > 0 && replayCard) {
-      // Use all positions - first position is after the first move
-      replayState.fens = [START_FEN].concat(positions.map(p => p.fen).filter(Boolean));
-      replayState.positions = positions; // Use all positions, not sliced
+      replayState.fens = positions.map(p => p.fen).filter(Boolean);
+      replayState.positions = positions;
       replayState.index = 0;
       replayCard.style.display = 'block';
       const boardConfig = {
@@ -342,9 +336,8 @@ document.addEventListener('DOMContentLoaded', () => {
       } else if (replayBoard) {
         replayBoard.position(replayState.fens[0]);
       }
-      setEvalBar(document.getElementById('replay-eval-bar-wrap'), null);
-      // Store full-game evals (include start as null so indices match replayState.index)
-      replayAllEvals = [null].concat(positions.map(p => (p && p.eval != null ? p.eval : null)));
+      setEvalBar(document.getElementById('replay-eval-bar-wrap'), positions[0] && positions[0].eval != null ? positions[0].eval : null);
+      replayAllEvals = positions.map(p => (p && p.eval != null ? p.eval : null));
       updateReplayInfo();
     }
 
@@ -378,30 +371,43 @@ document.addEventListener('DOMContentLoaded', () => {
     el.appendChild(list);
   }
 
-  function drawSingleEvalPlot(canvas, evalsCp, currentIndex) {
+  function drawSingleEvalPlot(canvas, evalsCp, currentIndex, mistakes) {
     const ctx = canvas.getContext('2d');
     const width = canvas.width;
     const height = canvas.height;
-    const padding = 34;
+    const padding = 40;
     const plotWidth = width - 2 * padding;
     const plotHeight = height - 2 * padding;
 
-    ctx.fillStyle = '#1e272e';
+    ctx.fillStyle = '#2f3640';
     ctx.fillRect(0, 0, width, height);
 
     const data = (evalsCp || []).map(v => (v == null || isNaN(v) ? null : v)).filter(v => v != null);
     if (!data.length) return;
 
-    // Fixed eval range -8 to +8 pawns (same as eval bar)
+    const total = Math.max(evalsCp.length, 2);
     const yMin = -800;
     const yMax = 800;
     const yRange = yMax - yMin;
-    const total = Math.max(evalsCp.length, 2);
-
     const evalToY = (cp) => padding + plotHeight - ((Math.max(-800, Math.min(800, cp)) - yMin) / yRange) * plotHeight;
     const idxToX = (i) => padding + (i / Math.max(total - 1, 1)) * plotWidth;
 
-    // Axes
+    const move15Idx = Math.min(30, total - 1);
+    const move30Idx = Math.min(60, total - 1);
+    ctx.strokeStyle = 'rgba(46, 204, 113, 0.5)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(idxToX(move15Idx), padding);
+    ctx.lineTo(idxToX(move15Idx), height - padding);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(231, 76, 60, 0.5)';
+    ctx.beginPath();
+    ctx.moveTo(idxToX(move30Idx), padding);
+    ctx.lineTo(idxToX(move30Idx), height - padding);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
     ctx.strokeStyle = '#636e72';
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -410,14 +416,12 @@ document.addEventListener('DOMContentLoaded', () => {
     ctx.lineTo(width - padding, height - padding);
     ctx.stroke();
 
-    // Zero line
-    ctx.strokeStyle = '#2d3436';
+    ctx.strokeStyle = '#b2bec3';
     ctx.beginPath();
     ctx.moveTo(padding, evalToY(0));
     ctx.lineTo(width - padding, evalToY(0));
     ctx.stroke();
 
-    // Line
     ctx.strokeStyle = '#81ecec';
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -431,7 +435,46 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     ctx.stroke();
 
-    // Current move marker
+    const mistakeList = mistakes || [];
+    mistakeList.forEach((m) => {
+      const posIdx = m.position_index;
+      if (posIdx == null || posIdx < 0 || posIdx >= evalsCp.length) return;
+      const cp = evalsCp[posIdx];
+      if (cp == null || isNaN(cp)) return;
+      const x = idxToX(posIdx);
+      const y = evalToY(cp);
+      const sev = (m.severity || '').toLowerCase();
+      if (sev === 'blunder') {
+        ctx.strokeStyle = '#E74C3C';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(x - 6, y - 6);
+        ctx.lineTo(x + 6, y + 6);
+        ctx.moveTo(x + 6, y - 6);
+        ctx.lineTo(x - 6, y + 6);
+        ctx.stroke();
+      } else if (sev === 'mistake') {
+        ctx.fillStyle = '#F39C12';
+        ctx.strokeStyle = '#636e72';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(x, y, 6, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.stroke();
+      } else if (sev === 'inaccuracy') {
+        ctx.fillStyle = '#a29bfe';
+        ctx.strokeStyle = '#636e72';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x, y - 6);
+        ctx.lineTo(x + 6, y + 5);
+        ctx.lineTo(x - 6, y + 5);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      }
+    });
+
     if (typeof currentIndex === 'number' && currentIndex >= 0) {
       const x = idxToX(Math.min(currentIndex, total - 1));
       ctx.strokeStyle = 'rgba(255, 234, 167, 0.65)';
@@ -442,16 +485,63 @@ document.addEventListener('DOMContentLoaded', () => {
       ctx.stroke();
     }
 
-    // Y ticks (pawns) -8 to +8
     ctx.fillStyle = '#b2bec3';
-    ctx.font = '10px sans-serif';
+    ctx.font = '11px sans-serif';
     ctx.textAlign = 'right';
     for (let cp = -800; cp <= 800; cp += 200) {
       const y = evalToY(cp);
       if (y < padding || y > height - padding) continue;
       const pawns = (cp / 100).toFixed(1);
-      ctx.fillText((cp >= 0 ? '+' : '') + pawns, padding - 6, y + 3);
+      ctx.fillText((cp >= 0 ? '+' : '') + pawns, padding - 6, y + 4);
     }
+
+    ctx.fillStyle = '#b2bec3';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Opening', padding + (idxToX(move15Idx) - padding) / 2, height - 6);
+    ctx.fillText('Middlegame', idxToX(move15Idx) + (idxToX(move30Idx) - idxToX(move15Idx)) / 2, height - 6);
+    ctx.fillText('Endgame', idxToX(move30Idx) + (width - padding - idxToX(move30Idx)) / 2, height - 6);
+
+    const legX = width - 130;
+    const legY = padding + 6;
+    ctx.fillStyle = 'rgba(45, 52, 54, 0.92)';
+    ctx.strokeStyle = '#636e72';
+    ctx.fillRect(legX, legY, 118, 48);
+    ctx.strokeRect(legX, legY, 118, 48);
+    ctx.textAlign = 'left';
+    ctx.font = '11px sans-serif';
+    const iconX = legX + 6;
+    const rowH = 16;
+    ctx.strokeStyle = '#E74C3C';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(iconX - 4, legY + 6);
+    ctx.lineTo(iconX + 4, legY + 14);
+    ctx.moveTo(iconX + 4, legY + 6);
+    ctx.lineTo(iconX - 4, legY + 14);
+    ctx.stroke();
+    ctx.fillStyle = '#b2bec3';
+    ctx.fillText('Blunder', legX + 26, legY + 14);
+    ctx.fillStyle = '#F39C12';
+    ctx.strokeStyle = '#636e72';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(iconX, legY + 6 + rowH, 5, 0, 2 * Math.PI);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#b2bec3';
+    ctx.fillText('Mistake', legX + 26, legY + 14 + rowH);
+    ctx.fillStyle = '#a29bfe';
+    ctx.strokeStyle = '#636e72';
+    ctx.beginPath();
+    ctx.moveTo(iconX, legY + 6 + rowH * 2 - 4);
+    ctx.lineTo(iconX + 5, legY + 6 + rowH * 2 + 6);
+    ctx.lineTo(iconX - 5, legY + 6 + rowH * 2 + 6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#b2bec3';
+    ctx.fillText('Inaccuracy', legX + 26, legY + 14 + rowH * 2);
   }
 
   function renderMistakeSummaryAndList(mistakes) {
@@ -563,29 +653,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const view = document.createElement('div');
     view.className = 'mistake-view';
 
-    // Explanation
-    const explanation = document.createElement('div');
-    explanation.className = 'explanation';
-    const detailsObj = mistake.details || {};
-    let expText = `❌ ${mistake.severity || 'Mistake'}: ${mistake.move_played_san || mistake.move_played || 'N/A'}\n\n`;
-    if (detailsObj.headline) {
-      expText += `🔴 ${detailsObj.headline}\n\n`;
-    }
-    if (detailsObj.detail) {
-      expText += `   → ${detailsObj.detail}\n\n`;
-    }
-    if (detailsObj.detail_lines) {
-      detailsObj.detail_lines.forEach(line => {
-        if (typeof line === 'string') {
-          expText += `   • ${line}\n`;
-        } else if (line.message) {
-          expText += `   • ${line.message}\n`;
-        }
-      });
-    }
-    explanation.textContent = expText;
-    view.appendChild(explanation);
-
     // Show loading state
     const loadingDiv = document.createElement('div');
     loadingDiv.style.padding = '1rem';
@@ -664,12 +731,13 @@ document.addEventListener('DOMContentLoaded', () => {
       const plotContainer = document.createElement('div');
       plotContainer.style.marginTop = '2rem';
       plotContainer.style.padding = '1rem';
-      plotContainer.style.background = '#1e272e';
+      plotContainer.style.background = '#2f3640';
       plotContainer.style.borderRadius = '8px';
       const plotTitle = document.createElement('h4');
       plotTitle.textContent = 'Evaluation Comparison';
       plotTitle.style.marginTop = '0';
       plotTitle.style.marginBottom = '1rem';
+      plotTitle.style.color = '#f5f6fa';
       plotContainer.appendChild(plotTitle);
       
       const canvas = document.createElement('canvas');
@@ -727,8 +795,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const plotWidth = width - 2 * padding;
     const plotHeight = height - 2 * padding;
     
-    // Clear canvas
-    ctx.fillStyle = '#1e272e';
+    // Clear canvas (dark theme)
+    ctx.fillStyle = '#2f3640';
     ctx.fillRect(0, 0, width, height);
     
     // All curves start from the mistake (x=0 = after mistake); fixed y range -8 to +8 pawns
@@ -871,27 +939,27 @@ document.addEventListener('DOMContentLoaded', () => {
     ctx.translate(12, height / 2);
     ctx.rotate(-Math.PI / 2);
     ctx.textAlign = 'center';
+    ctx.fillStyle = '#b2bec3';
     ctx.fillText('Eval (pawns)', 0, 0);
     ctx.restore();
 
-    // Draw legend
+    // Legend: bottom-left so it doesn't overlap the curves
+    const legendX = padding + 8;
+    const legendY = height - padding - 52;
+    ctx.fillStyle = 'rgba(45, 52, 54, 0.92)';
+    ctx.strokeStyle = '#636e72';
+    ctx.fillRect(legendX, legendY, 120, 44);
+    ctx.strokeRect(legendX, legendY, 120, 44);
     ctx.font = '12px sans-serif';
     ctx.textAlign = 'left';
-    let legY = 20;
     ctx.fillStyle = '#ff7675';
-    ctx.fillRect(width - 150, legY - 2, 15, 2);
+    ctx.fillRect(legendX + 8, legendY + 12, 14, 2);
     ctx.fillStyle = '#b2bec3';
-    ctx.fillText('Mistake line', width - 130, legY + 3);
-    legY += 20;
+    ctx.fillText('Mistake line', legendX + 26, legendY + 16);
     ctx.fillStyle = '#81ecec';
-    ctx.fillRect(width - 150, legY - 2, 15, 2);
+    ctx.fillRect(legendX + 8, legendY + 30, 14, 2);
     ctx.fillStyle = '#b2bec3';
-    ctx.fillText('Best line', width - 130, legY + 3);
-    legY += 20;
-    ctx.fillStyle = '#ffeaa7';
-    ctx.fillRect(width - 150, legY - 2, 15, 2);
-    ctx.fillStyle = '#b2bec3';
-    ctx.fillText('Actual game', width - 130, legY + 3);
+    ctx.fillText('Best line', legendX + 26, legendY + 34);
   }
 
   function drawArrow(overlayEl, uci, isWhiteMove, squareSize) {
@@ -945,10 +1013,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const section = document.createElement('div');
     section.className = 'board-section';
-
-    const h3 = document.createElement('h3');
-    h3.textContent = title;
-    section.appendChild(h3);
 
     const boardWithEval = document.createElement('div');
     boardWithEval.className = 'board-with-eval';

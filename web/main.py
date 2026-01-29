@@ -213,19 +213,22 @@ def get_evals_for_fens(engine, fens, time_limit=0.15):
     return evals
 
 
-def get_pv_from_fen(engine, fen, time_limit=0.4):
+def get_pv_from_fen(engine, fen, time_limit=0.4, depth_limit=None):
     """Analyze a FEN position and return PV moves with evals."""
     if not fen:
         return {"variation": [], "evals": []}
     
     try:
         board = chess.Board(fen)
-        info = engine.analyse(board, chess.engine.Limit(time=time_limit), multipv=1)
-        
-        if not info or "pv" not in info[0] or len(info[0]["pv"]) == 0:
+        limit = chess.engine.Limit(time=time_limit)
+        if depth_limit is not None:
+            limit = chess.engine.Limit(time=time_limit, depth=depth_limit)
+        info = engine.analyse(board, limit, multipv=1)
+        info_list = info if isinstance(info, list) else [info]
+        if not info_list or "pv" not in info_list[0] or len(info_list[0]["pv"]) == 0:
             return {"variation": [], "evals": []}
         
-        pv_moves = info[0]["pv"]
+        pv_moves = info_list[0]["pv"]
         variation = []
         fens = []
         temp_board = board.copy()
@@ -521,8 +524,10 @@ async def analyze_mistake_fens(request: AnalyzeFensRequest):
         )
 
     try:
-        # 1. Mistake board: PV from FEN after mistake
-        after_result = get_pv_from_fen(engine, request.fen_after_mistake, time_limit=0.4)
+        # 1. Mistake board: PV from FEN after mistake (depth for full PV line)
+        after_result = get_pv_from_fen(
+            engine, request.fen_after_mistake, time_limit=0.9, depth_limit=22
+        )
         
         # Build continuation: mistake move first, then PV from after mistake
         continuation_variation = []
@@ -552,8 +557,10 @@ async def analyze_mistake_fens(request: AnalyzeFensRequest):
         continuation_variation.extend(after_result["variation"])
         continuation_evals.extend(after_result["evals"])
         
-        # 2. Best alternative board: PV from FEN before mistake
-        before_result = get_pv_from_fen(engine, request.fen_before_mistake, time_limit=0.4)
+        # 2. Best alternative board: PV from FEN before mistake (depth for full PV)
+        before_result = get_pv_from_fen(
+            engine, request.fen_before_mistake, time_limit=0.9, depth_limit=22
+        )
         
         best_variation = before_result["variation"]
         best_evals = before_result["evals"]
