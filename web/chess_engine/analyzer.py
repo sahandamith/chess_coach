@@ -227,10 +227,9 @@ class ChessAnalyzer:
             
             # Convert to chess move number for display (position i+1 corresponds to chess move (i+1)/2)
             chess_move = (i + 1) / 2.0
-            if chess_move == int(chess_move):
-                print(f"Analyzed move {int(chess_move)}/{len(moves)/2:.0f}", end='\r')
-            else:
-                print(f"Analyzing move {chess_move:.1f}...", end='\r')
+            total_moves = len(moves) / 2.0
+            # Update same line so job logs show one line that updates (Move 0.5/40 -> 1/40 -> ...)
+            print(f"Analyzed move {chess_move:.1f}/{total_moves:.0f}", end="\r", flush=True)
 
         print("\nAnalysis complete.")
         return self.analysis_results

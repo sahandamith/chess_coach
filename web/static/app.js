@@ -277,9 +277,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         let lastMoveProgress = null;
         for (let i = logs.length - 1; i >= 0; i--) {
-          const m = logs[i].match(/Analyzed move (\d+)\/(\d+)/);
+          const m = logs[i].match(/Analyzed move ([\d.]+)\/(\d+)/);
           if (m) {
-            lastMoveProgress = { current: parseInt(m[1], 10), total: parseInt(m[2], 10) };
+            lastMoveProgress = { current: parseFloat(m[1]), total: parseInt(m[2], 10) };
             break;
           }
         }
@@ -298,7 +298,8 @@ document.addEventListener('DOMContentLoaded', () => {
           text = `Computing detail for mistake ${detailProgress.current} of ${detailProgress.total}`;
           if (foundMistakes) text += '\n' + foundMistakes.trim();
         } else if (lastMoveProgress) {
-          text = `Analyzing moves: ${lastMoveProgress.current} of ${lastMoveProgress.total}`;
+          const cur = lastMoveProgress.current;
+          text = `Move ${cur % 1 === 0 ? Math.round(cur) : cur.toFixed(1)} of ${lastMoveProgress.total}`;
           if (analyzingMistakes) text += '\nAnalyzing mistakes...';
           else if (complete) text += '\nAnalysis complete.';
           if (foundMistakes) text += '\n' + foundMistakes.trim();
@@ -372,6 +373,11 @@ document.addEventListener('DOMContentLoaded', () => {
   window.__runAnalyze = function () { analyze(); };
 
   function renderResult(data) {
+    // Show sections 2, 3, 4 once we have results
+    document.querySelectorAll('.section-later').forEach(function (el) {
+      el.classList.remove('section-later');
+    });
+
     const game = data.game || {};
     resultDiv.textContent = `${game.white || '?'} vs ${game.black || '?'} (${game.result || '?'})`;
 

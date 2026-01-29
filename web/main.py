@@ -53,6 +53,26 @@ def _job_append_log(job_id: str, line: str) -> None:
             del logs[:2000]
 
 
+def _job_update_last_log(job_id: str, line: str) -> None:
+    """Replace the last log line with this line if it was a progress line (same-line update)."""
+    line = (line or "").strip()
+    if not line:
+        return
+    with _ANALYSIS_JOBS_LOCK:
+        job = _ANALYSIS_JOBS.get(job_id)
+        if not job:
+            return
+        logs: List[str] = job.setdefault("logs", [])
+        if not logs:
+            logs.append(line)
+            return
+        last = logs[-1]
+        if last.startswith("Analyzed move ") or last.startswith("Computing detail "):
+            logs[-1] = line
+        else:
+            logs.append(line)
+
+
 class _JobLogStream:
     def __init__(self, job_id: str) -> None:
         self.job_id = job_id
@@ -62,6 +82,10 @@ class _JobLogStream:
         if not s:
             return 0
         self._buf += s
+        # Handle \r: update same line in job logs (e.g. "Analyzed move 5/40\r" replaces last progress line)
+        while "\r" in self._buf:
+            before, self._buf = self._buf.split("\r", 1)
+            _job_update_last_log(self.job_id, before)
         while "\n" in self._buf:
             line, self._buf = self._buf.split("\n", 1)
             _job_append_log(self.job_id, line)

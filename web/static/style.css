@@ -24,6 +24,11 @@ h1, h2, h3 {
   box-shadow: 0 4px 12px rgba(0,0,0,0.3);
 }
 
+/* Sections 2, 3, 4 hidden until analysis completes */
+.section-later {
+  display: none !important;
+}
+
 textarea {
   width: 100%;
   min-height: 140px;
@@ -148,8 +153,8 @@ pre {
 }
 
 .replay-left {
-  width: 260px;
-  flex: 0 0 260px;
+  width: 320px;
+  flex: 0 0 320px;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -157,7 +162,7 @@ pre {
 
 .replay-center {
   flex: 0 0 auto;
-  margin-left: 1.5rem;
+  margin-left: 2.5rem;
   display: flex;
   flex-direction: column;
 }
