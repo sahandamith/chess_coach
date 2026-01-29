@@ -498,10 +498,17 @@ async def analyze_job_status(job_id: str, since: int = 0):
 
 @app.get("/")
 async def index():
-    """Serve the single-page app."""
+    """Serve the single-page app. Disable caching so users always get latest HTML."""
     index_path = os.path.join(STATIC_DIR, "index.html")
     if os.path.isfile(index_path):
-        return FileResponse(index_path)
+        return FileResponse(
+            index_path,
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
     return {"message": "Chess Coach API. Use POST /api/analyze with {\"pgn\": \"...\"}."}
 
 
