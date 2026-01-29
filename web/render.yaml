@@ -1,0 +1,9 @@
+# Render.com – use Docker (recommended). In Dashboard: Root Directory = web, Environment = Docker.
+# The Dockerfile in web/ installs Stockfish and runs uvicorn; no Start Command or STOCKFISH_PATH needed.
+services:
+  - type: web
+    name: chess-coach
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # Root Directory in Dashboard must be set to: web

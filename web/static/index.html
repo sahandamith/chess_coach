@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chess Coach Web</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <!-- Chessboard.js CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css" />
+  <!-- jQuery required by chessboard.js -->
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <!-- Chess.js for position handling (0.10.3 is UMD; 0.13+ is ESM-only) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+  <!-- Chessboard.js -->
+  <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
+</head>
+<body>
+  <div class="container">
+    <h1>Chess Coach (Web)</h1>
+    <div class="card">
+      <h2>1. Paste your PGN</h2>
+      <form id="pgn-form" onsubmit="return false;">
+        <textarea id="pgn" name="pgn" placeholder="Paste a single game PGN here..."></textarea>
+        <div style="margin-top: 0.75rem;">
+          <button type="button" id="analyze-btn">Analyze Game</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>2. Summary</h2>
+      <div id="result">No analysis yet.</div>
+      <div id="analysis-status" class="analysis-status" style="display: none;"></div>
+    </div>
+
+    <div class="card" id="replay-card" style="display: none;">
+      <h2>Play back game</h2>
+      <p class="replay-hint">Step through the game move by move. Click a move to jump to that position.</p>
+      <div class="replay-layout">
+        <div class="replay-left">
+          <div class="replay-moves-section replay-moves-section-compact">
+            <div class="replay-moves-label">Moves</div>
+            <div class="pv-moves-list replay-moves-list" id="replay-pv-moves"></div>
+          </div>
+        </div>
+
+        <div class="replay-center">
+          <div class="replay-board-wrapper" id="replay-board-wrapper">
+            <div id="replay-board" style="width: 460px; height: 460px;"></div>
+            <div class="eval-bar-wrap" id="replay-eval-bar-wrap">
+              <div class="eval-bar" id="replay-eval-bar">
+                <div class="eval-bar-white" id="replay-eval-white"></div>
+                <div class="eval-bar-black" id="replay-eval-black"></div>
+              </div>
+              <div class="eval-bar-label" id="replay-eval-label">0.0</div>
+            </div>
+          </div>
+          <div class="replay-info" id="replay-info"></div>
+          <div class="board-nav">
+            <button type="button" id="replay-prev">◀ Prev</button>
+            <button type="button" id="replay-reset">Start</button>
+            <button type="button" id="replay-next">Next ▶</button>
+          </div>
+        </div>
+
+        <div class="replay-right">
+          <div class="replay-side-card">
+            <div class="replay-side-title">Eval plot</div>
+            <canvas id="replay-eval-plot" width="360" height="220"></canvas>
+          </div>
+          <div class="replay-side-card">
+            <div class="replay-side-title">Mistakes</div>
+            <div id="replay-mistakes-mini" class="replay-mistakes-mini"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>3. Mistakes</h2>
+      <div id="mistakes"></div>
+      <div id="mistake-details" style="margin-top:0.75rem;"></div>
+    </div>
+
+    <!-- Positions debug card no longer needed -->
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
+

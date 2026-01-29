@@ -1,0 +1,589 @@
+"""
+Chess Coach Web API – FastAPI app for game analysis and mistake review.
+Designed to run on Render.com or any ASGI host.
+"""
+import os
+import sys
+import io
+import json
+import uuid
+import threading
+import time
+from typing import Any, Dict, List, Optional
+
+# Run from web/ (Render) so we can import chess_engine from web/chess_engine
+ROOT = os.path.dirname(os.path.abspath(__file__))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+import chess
+import chess.engine
+from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+app = FastAPI(title="Chess Coach API", version="1.0.0")
+
+# Mount static files (HTML, JS, CSS)
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+if os.path.isdir(STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+#
+# Analysis job store (so the web UI can stream live logs)
+#
+_ANALYSIS_JOBS: Dict[str, Dict[str, Any]] = {}
+_ANALYSIS_JOBS_LOCK = threading.Lock()
+_STDIO_LOCK = threading.Lock()  # redirecting sys.stdout/sys.stderr is process-wide
+
+
+def _job_append_log(job_id: str, line: str) -> None:
+    line = (line or "").rstrip("\r")
+    if not line:
+        return
+    with _ANALYSIS_JOBS_LOCK:
+        job = _ANALYSIS_JOBS.get(job_id)
+        if not job:
+            return
+        logs: List[str] = job.setdefault("logs", [])
+        logs.append(line)
+        # Prevent unbounded growth in long sessions
+        if len(logs) > 4000:
+            del logs[:2000]
+
+
+class _JobLogStream:
+    def __init__(self, job_id: str) -> None:
+        self.job_id = job_id
+        self._buf = ""
+
+    def write(self, s: str) -> int:
+        if not s:
+            return 0
+        self._buf += s
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            _job_append_log(self.job_id, line)
+        return len(s)
+
+    def flush(self) -> None:
+        if self._buf:
+            _job_append_log(self.job_id, self._buf)
+            self._buf = ""
+
+
+def _run_analysis_job(job_id: str, pgn_string: str) -> None:
+    from chess_engine.analyzer import ChessAnalyzer
+
+    with _ANALYSIS_JOBS_LOCK:
+        job = _ANALYSIS_JOBS.get(job_id)
+        if not job:
+            return
+        job["status"] = "running"
+        job["started_at"] = time.time()
+
+    engine_path = get_stockfish_path()
+    analyzer = None
+
+    # Capture stdout/stderr so the browser can show the same progress as the terminal.
+    with _STDIO_LOCK:
+        old_out, old_err = sys.stdout, sys.stderr
+        sys.stdout = _JobLogStream(job_id)  # type: ignore[assignment]
+        sys.stderr = _JobLogStream(job_id)  # type: ignore[assignment]
+        try:
+            analyzer = ChessAnalyzer(engine_path, move_time_ms=400)
+            analyzer.open_engine()
+
+            if not analyzer.load_pgn_string(pgn_string):
+                raise ValueError("Invalid PGN")
+
+            analyzer.analyze_game()
+            analyzer.analyze_mistakes()
+
+            mistakes = [serialize_mistake(m) for m in analyzer.get_mistake_analyses()]
+            results = analyzer.get_analysis_results()
+            evals = []
+            for r in results:
+                evals.append({
+                    "fen": r.get("fen"),
+                    "eval": r.get("eval") if isinstance(r.get("eval"), (int, float)) else None,
+                    "move_san": r.get("move_san"),
+                    "move_uci": r.get("move_uci"),
+                    "is_white_move": r.get("is_white_move"),
+                    "mistake_category": r.get("mistake_category"),
+                })
+
+            game = analyzer.game
+            headers = game.headers if game else {}
+            result_payload = {
+                "game": {
+                    "white": headers.get("White", "?"),
+                    "black": headers.get("Black", "?"),
+                    "result": headers.get("Result", "?"),
+                },
+                "positions": evals,
+                "mistakes": mistakes,
+            }
+
+            with _ANALYSIS_JOBS_LOCK:
+                job = _ANALYSIS_JOBS.get(job_id)
+                if job:
+                    job["status"] = "done"
+                    job["result"] = result_payload
+                    job["finished_at"] = time.time()
+        except Exception as e:
+            with _ANALYSIS_JOBS_LOCK:
+                job = _ANALYSIS_JOBS.get(job_id)
+                if job:
+                    job["status"] = "error"
+                    job["error"] = str(e)
+                    job["finished_at"] = time.time()
+        finally:
+            try:
+                if analyzer is not None:
+                    analyzer.close_engine()
+            except Exception:
+                pass
+            try:
+                sys.stdout.flush()  # type: ignore[union-attr]
+                sys.stderr.flush()  # type: ignore[union-attr]
+            except Exception:
+                pass
+            sys.stdout, sys.stderr = old_out, old_err
+
+
+def get_stockfish_path():
+    """Resolve Stockfish executable path. Use STOCKFISH_PATH on Render."""
+    env_path = os.environ.get("STOCKFISH_PATH")
+    if env_path and os.path.isfile(env_path):
+        return env_path
+    return "stockfish"
+
+
+def serialize_move(m):
+    """Convert Move object or string to UCI string for JSON."""
+    if m is None:
+        return None
+    if hasattr(m, "uci"):
+        return m.uci()
+    return str(m) if isinstance(m, str) else None
+
+
+def serialize_best_moves(best_moves):
+    """Make best_moves / variation structures JSON-serializable."""
+    if not best_moves:
+        return []
+    out = []
+    for b in best_moves:
+        move = b.get("move")
+        variation = b.get("variation") or []
+        out.append({
+            "move": serialize_move(move),
+            "move_uci": b.get("move_uci") or serialize_move(move),
+            "move_san": b.get("move_san"),
+            "eval": b.get("eval"),
+            "depth": b.get("depth"),
+            "variation": [
+                {
+                    "move": serialize_move(v.get("move")),
+                    "move_uci": v.get("move_uci"),
+                    "move_san": v.get("move_san"),
+                }
+                for v in variation
+            ],
+        })
+    return out
+
+
+def get_evals_for_fens(engine, fens, time_limit=0.15):
+    """Run engine on each FEN and return list of centipawn evals (White's perspective)."""
+    evals = []
+    for fen in fens:
+        if not fen:
+            evals.append(None)
+            continue
+        try:
+            board = chess.Board(fen)
+            info = engine.analyse(board, chess.engine.Limit(time=time_limit))
+            score = info["score"].white().score(mate_score=10000)
+            evals.append(score if score is not None else None)
+        except Exception:
+            evals.append(None)
+    return evals
+
+
+def get_pv_from_fen(engine, fen, time_limit=0.4):
+    """Analyze a FEN position and return PV moves with evals."""
+    if not fen:
+        return {"variation": [], "evals": []}
+    
+    try:
+        board = chess.Board(fen)
+        info = engine.analyse(board, chess.engine.Limit(time=time_limit), multipv=1)
+        
+        if not info or "pv" not in info[0] or len(info[0]["pv"]) == 0:
+            return {"variation": [], "evals": []}
+        
+        pv_moves = info[0]["pv"]
+        variation = []
+        fens = []
+        temp_board = board.copy()
+        
+        # Build variation with moves and FENs
+        for move in pv_moves:
+            if move not in temp_board.legal_moves:
+                break
+            try:
+                variation.append({
+                    "move": move.uci(),
+                    "move_uci": move.uci(),
+                    "move_san": temp_board.san(move)
+                })
+                temp_board.push(move)
+                fens.append(temp_board.fen())
+            except (ValueError, AssertionError):
+                break
+        
+        # Get evals for each position in the PV
+        evals = get_evals_for_fens(engine, fens, time_limit=0.15)
+        
+        return {
+            "variation": variation,
+            "evals": evals
+        }
+    except Exception as e:
+        print(f"Error getting PV from FEN: {e}")
+        return {"variation": [], "evals": []}
+
+
+def _uci_from_variation_item(v):
+    """Get UCI string from a variation item (may have move object or move_uci)."""
+    uci = v.get("move_uci")
+    if uci:
+        return uci if isinstance(uci, str) else (getattr(uci, "uci", lambda: None)() or str(uci))
+    m = v.get("move")
+    if m is None:
+        return None
+    return m.uci() if hasattr(m, "uci") else str(m)
+
+
+def build_continuation_fens(mistake):
+    """Build list of FENs along the mistake continuation (after mistake, then each reply)."""
+    after_fen = mistake.get("position_after_fen")
+    if not after_fen:
+        return []
+    cont = mistake.get("continuation_moves") or []
+    if not cont or not cont[0].get("variation"):
+        return [after_fen]
+    fens = [after_fen]
+    board = chess.Board(after_fen)
+    for v in cont[0]["variation"]:
+        uci = _uci_from_variation_item(v)
+        if not uci:
+            continue
+        try:
+            move = chess.Move.from_uci(uci)
+            if move in board.legal_moves:
+                board.push(move)
+                fens.append(board.fen())
+        except (ValueError, AssertionError):
+            pass
+    return fens
+
+
+def build_best_fens(mistake):
+    """Build list of FENs along the best line (after best move, then each in variation)."""
+    before_fen = mistake.get("position_before_fen")
+    if not before_fen:
+        return []
+    best_list = mistake.get("best_moves") or []
+    if not best_list or not best_list[0].get("variation"):
+        return []
+    board = chess.Board(before_fen)
+    fens = []
+    for v in best_list[0]["variation"]:
+        uci = _uci_from_variation_item(v)
+        if not uci:
+            continue
+        try:
+            move = chess.Move.from_uci(uci)
+            if move in board.legal_moves:
+                board.push(move)
+                fens.append(board.fen())
+        except (ValueError, AssertionError):
+            pass
+    return fens
+
+
+def serialize_mistake(mistake):
+    """Convert one mistake analysis to a JSON-safe dict."""
+    out = {
+        "position_index": mistake.get("position_index"),
+        "chess_move": mistake.get("chess_move"),
+        "severity": mistake.get("severity"),
+        "phase": mistake.get("phase"),
+        "move_played": mistake.get("move_played"),
+        "move_played_san": mistake.get("move_played_san"),
+        "position_before_fen": mistake.get("position_before_fen"),
+        "position_after_fen": mistake.get("position_after_fen"),
+        "position_fen": mistake.get("position_fen"),
+        "prev_eval": mistake.get("prev_eval"),
+        "curr_eval": mistake.get("curr_eval"),
+        "eval_drop": mistake.get("eval_drop"),
+        "primary_category": mistake.get("primary_category"),
+        "details": mistake.get("details"),
+        "best_moves": serialize_best_moves(mistake.get("best_moves") or []),
+        "continuation_moves": [
+            {"variation": serialize_best_moves(c.get("variation") or [])}
+            for c in (mistake.get("continuation_moves") or [])
+        ],
+    }
+    if mistake.get("continuation_evals") is not None:
+        out["continuation_evals"] = mistake["continuation_evals"]
+    if mistake.get("best_evals") is not None:
+        out["best_evals"] = mistake["best_evals"]
+    return out
+
+
+class AnalyzeRequest(BaseModel):
+    pgn: str
+
+
+class AnalyzeMistakeRequest(BaseModel):
+    pgn: str
+    mistake_index: int
+
+
+class AnalyzeFensRequest(BaseModel):
+    fen_after_mistake: str  # For mistake continuation board
+    fen_before_mistake: str  # For best alternative board
+    move_played_uci: str  # The mistake move UCI
+
+
+@app.post("/api/analyze-job")
+async def analyze_job(request: AnalyzeRequest):
+    """
+    Start an analysis job and stream logs via GET /api/analyze-job/{job_id}.
+    This lets the web UI show the same progress lines you see in the terminal.
+    """
+    pgn_string = (request.pgn or "").strip()
+    if not pgn_string:
+        raise HTTPException(status_code=400, detail="PGN string is required")
+
+    job_id = uuid.uuid4().hex
+    with _ANALYSIS_JOBS_LOCK:
+        _ANALYSIS_JOBS[job_id] = {
+            "status": "queued",
+            "logs": [],
+            "result": None,
+            "error": None,
+            "created_at": time.time(),
+        }
+
+    t = threading.Thread(target=_run_analysis_job, args=(job_id, pgn_string), daemon=True)
+    t.start()
+
+    return {"job_id": job_id}
+
+
+@app.get("/api/analyze-job/{job_id}")
+async def analyze_job_status(job_id: str, since: int = 0):
+    """
+    Poll job status and fetch logs incrementally.
+    Pass `since` as the last log index you’ve already received.
+    """
+    with _ANALYSIS_JOBS_LOCK:
+        job = _ANALYSIS_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Unknown job id")
+
+        logs: List[str] = job.get("logs") or []
+        start = max(0, int(since))
+        new_logs = logs[start:]
+        next_index = len(logs)
+
+        payload: Dict[str, Any] = {
+            "job_id": job_id,
+            "status": job.get("status"),
+            "logs": new_logs,
+            "next": next_index,
+            "error": job.get("error"),
+        }
+
+        if job.get("status") == "done":
+            payload["result"] = job.get("result")
+
+        return payload
+
+
+@app.get("/")
+async def index():
+    """Serve the single-page app."""
+    index_path = os.path.join(STATIC_DIR, "index.html")
+    if os.path.isfile(index_path):
+        return FileResponse(index_path)
+    return {"message": "Chess Coach API. Use POST /api/analyze with {\"pgn\": \"...\"}."}
+
+
+@app.get("/health")
+async def health():
+    """Health check for Render and load balancers."""
+    return {"status": "ok"}
+
+
+@app.post("/api/analyze")
+async def analyze(request: AnalyzeRequest):
+    """
+    Analyze a game from PGN: run engine analysis and mistake detection.
+    Returns game info, evals per position, and list of mistakes with FENs and best lines.
+    """
+    from chess_engine.analyzer import ChessAnalyzer
+
+    pgn_string = (request.pgn or "").strip()
+    if not pgn_string:
+        raise HTTPException(status_code=400, detail="PGN string is required")
+
+    engine_path = get_stockfish_path()
+    try:
+        analyzer = ChessAnalyzer(engine_path, move_time_ms=400)
+        analyzer.open_engine()
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Engine unavailable: {str(e)}. Set STOCKFISH_PATH or install Stockfish."
+        )
+
+    try:
+        if not analyzer.load_pgn_string(pgn_string):
+            raise HTTPException(status_code=400, detail="Invalid PGN")
+        analyzer.analyze_game()
+        analyzer.analyze_mistakes()
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Try to close engine, but don't fail if it's already dead
+        try:
+            analyzer.close_engine()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+
+    # Don't analyze mistake/best lines upfront - do it on demand when mistake is clicked
+    # This saves time and resources since users may not review all mistakes
+    mistakes = [serialize_mistake(m) for m in analyzer.get_mistake_analyses()]
+    results = analyzer.get_analysis_results()
+    evals = []
+    for r in results:
+        evals.append({
+            "fen": r.get("fen"),
+            "eval": r.get("eval") if isinstance(r.get("eval"), (int, float)) else None,
+            "move_san": r.get("move_san"),
+            "move_uci": r.get("move_uci"),
+            "is_white_move": r.get("is_white_move"),
+            "mistake_category": r.get("mistake_category"),
+        })
+
+    try:
+        analyzer.close_engine()
+    except Exception:
+        pass  # Engine might already be closed
+
+    game = analyzer.game
+    headers = game.headers if game else {}
+    return {
+        "game": {
+            "white": headers.get("White", "?"),
+            "black": headers.get("Black", "?"),
+            "result": headers.get("Result", "?"),
+        },
+        "positions": evals,
+        "mistakes": mistakes,
+    }
+
+
+@app.post("/api/analyze-mistake-fens")
+async def analyze_mistake_fens(request: AnalyzeFensRequest):
+    """
+    Analyze mistake boards by analyzing only the specific FEN positions.
+    Much faster than re-analyzing the entire game.
+    """
+    engine_path = get_stockfish_path()
+    engine = None
+    
+    try:
+        engine = chess.engine.SimpleEngine.popen_uci(engine_path)
+        engine.configure({"Hash": 16})
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Engine unavailable: {str(e)}. Set STOCKFISH_PATH or install Stockfish."
+        )
+
+    try:
+        # 1. Mistake board: PV from FEN after mistake
+        after_result = get_pv_from_fen(engine, request.fen_after_mistake, time_limit=0.4)
+        
+        # Build continuation: mistake move first, then PV from after mistake
+        continuation_variation = []
+        continuation_evals = []
+        
+        # Add the mistake move first
+        if request.move_played_uci:
+            try:
+                board_before = chess.Board(request.fen_before_mistake)
+                move = chess.Move.from_uci(request.move_played_uci)
+                if move in board_before.legal_moves:
+                    continuation_variation.append({
+                        "move": request.move_played_uci,
+                        "move_uci": request.move_played_uci,
+                        "move_san": board_before.san(move)
+                    })
+                    # Get eval for position after mistake move (this is the position after the mistake)
+                    board_after = chess.Board(request.fen_after_mistake)
+                    info = engine.analyse(board_after, chess.engine.Limit(time=0.15))
+                    score = info["score"].white().score(mate_score=10000)
+                    continuation_evals.append(score if score is not None else None)
+            except Exception as e:
+                print(f"Error adding mistake move: {e}")
+        
+        # Add PV moves from position after mistake
+        # Note: after_result["evals"] are evals AFTER each PV move, so they align correctly
+        continuation_variation.extend(after_result["variation"])
+        continuation_evals.extend(after_result["evals"])
+        
+        # 2. Best alternative board: PV from FEN before mistake
+        before_result = get_pv_from_fen(engine, request.fen_before_mistake, time_limit=0.4)
+        
+        best_variation = before_result["variation"]
+        best_evals = before_result["evals"]
+        
+        # Get eval for start position (before mistake)
+        start_eval = None
+        try:
+            board_start = chess.Board(request.fen_before_mistake)
+            info_start = engine.analyse(board_start, chess.engine.Limit(time=0.15))
+            score_start = info_start["score"].white().score(mate_score=10000)
+            start_eval = score_start if score_start is not None else None
+        except Exception as e:
+            print(f"Error getting start eval: {e}")
+        
+    except Exception as e:
+        try:
+            engine.quit()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=f"Mistake analysis failed: {str(e)}")
+    
+    try:
+        engine.quit()
+    except Exception:
+        pass
+
+    return {
+        "continuation_moves": [{"variation": continuation_variation}],
+        "continuation_evals": continuation_evals,
+        "best_moves": [{"variation": best_variation}],
+        "best_evals": best_evals,
+        "start_eval": start_eval,
+    }
