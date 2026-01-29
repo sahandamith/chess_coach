@@ -24,6 +24,18 @@ let replayAllEvals = null;
 
 const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 
+/** Parse response as JSON; on failure return undefined or throw with a clear message. */
+async function parseJsonResponse(resp, defaultVal = undefined) {
+  const text = await resp.text();
+  try {
+    return text ? JSON.parse(text) : defaultVal;
+  } catch (e) {
+    if (defaultVal !== undefined) return defaultVal;
+    const preview = (text || resp.statusText || 'Empty response').slice(0, 80);
+    throw new Error(resp.ok ? `Invalid JSON: ${preview}` : `Server error (${resp.status}): ${preview}`);
+  }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   const form = document.getElementById('pgn-form');
   const pgnInput = document.getElementById('pgn');
@@ -259,14 +271,18 @@ document.addEventListener('DOMContentLoaded', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pgn }),
       });
+      const startData = await parseJsonResponse(startResp, {});
       if (!startResp.ok) {
-        const errData = await startResp.json().catch(() => ({}));
-        const errorMsg = 'Error: ' + (errData.detail || startResp.statusText);
+        const errorMsg = 'Error: ' + (startData.detail || startResp.statusText);
         resultDiv.textContent = errorMsg;
         if (analysisStatusDiv) analysisStatusDiv.textContent = 'Analysis failed: ' + errorMsg;
         return;
       }
-      const { job_id } = await startResp.json();
+      const job_id = startData.job_id;
+      if (!job_id) {
+        resultDiv.textContent = 'Error: No job_id in response.';
+        return;
+      }
       let since = 0;
       let allLogs = [];
       const pollIntervalMs = 400;
@@ -316,8 +332,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const poll = () =>
         fetch(`/api/analyze-job/${job_id}?since=${since}`)
-          .then((r) => r.json())
-          .then((payload) => {
+          .then(async (r) => ({ r, payload: await parseJsonResponse(r, null) }))
+          .then(({ r, payload }) => {
+            if (payload == null) return;
             const fullLogs = payload.logs || [];
             since = payload.next != null ? payload.next : since;
             allLogs = fullLogs;
@@ -777,8 +794,8 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!hasStoredPv && currentJobId) {
         try {
           const jobResp = await fetch(`/api/analyze-job/${currentJobId}`);
-          const jobPayload = await jobResp.json();
-          if (jobPayload.result && jobPayload.result.mistakes && jobPayload.result.mistakes[mistakeIndex]) {
+          const jobPayload = await parseJsonResponse(jobResp, null);
+          if (jobPayload && jobPayload.result && jobPayload.result.mistakes && jobPayload.result.mistakes[mistakeIndex]) {
             const updated = jobPayload.result.mistakes[mistakeIndex];
             if (updated.continuation_evals && updated.continuation_evals.length) {
               continuationEvals = updated.continuation_evals || [];
@@ -803,11 +820,9 @@ document.addEventListener('DOMContentLoaded', () => {
             move_played_uci: mistake.move_played_uci || ''
           }),
         });
-        if (!resp.ok) {
-          const errorData = await resp.json().catch(() => ({}));
-          throw new Error(errorData.detail || resp.statusText);
-        }
-        const analysisData = await resp.json();
+        const analysisData = await parseJsonResponse(resp, null);
+        if (analysisData == null) throw new Error('Invalid response from server');
+        if (!resp.ok) throw new Error(analysisData.detail || resp.statusText);
         continuationEvals = analysisData.continuation_evals || [];
         bestEvals = analysisData.best_evals || [];
         continuationMoves = analysisData.continuation_moves || [];
