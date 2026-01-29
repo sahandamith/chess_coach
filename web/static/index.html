@@ -55,7 +55,7 @@
               <div class="eval-bar-label" id="replay-eval-label">0.0</div>
             </div>
           </div>
-          <div class="replay-info" id="replay-info"></div>
+          <div class="replay-info" id="replay-info" style="display: none;"></div>
           <div class="board-nav">
             <button type="button" id="replay-prev">◀ Prev</button>
             <button type="button" id="replay-reset">Start</button>
@@ -65,14 +65,13 @@
 
         <div class="replay-right">
           <div class="replay-side-card">
-            <div class="replay-side-title">Eval plot</div>
-            <canvas id="replay-eval-plot" width="360" height="220"></canvas>
-          </div>
-          <div class="replay-side-card">
             <div class="replay-side-title">Mistakes</div>
             <div id="replay-mistakes-mini" class="replay-mistakes-mini"></div>
           </div>
         </div>
+      </div>
+      <div class="replay-eval-plot-wrap">
+        <canvas id="replay-eval-plot" width="900" height="320"></canvas>
       </div>
     </div>
 
