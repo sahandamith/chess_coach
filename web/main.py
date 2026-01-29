@@ -293,9 +293,13 @@ def get_evals_for_fens(engine, fens, time_limit=0.15):
     return evals
 
 
+# At least 10 full moves (20 plies) for mistake and best-alternative PVs
+MIN_PV_PLIES = 22  # request 22 plies so we reliably get at least 10 full moves
+
+
 def get_pv_from_fen(engine, fen, time_limit=0.4, min_depth=0):
     """Analyze a FEN position and return PV moves with evals.
-    Use min_depth > 0 (e.g. 14) to get longer PVs; engine stops when time or depth is reached.
+    Use min_depth > 0 to get longer PVs; engine stops when time or depth is reached.
     """
     if not fen:
         return {"variation": [], "evals": []}
@@ -454,7 +458,7 @@ def compute_mistake_pv(engine, fen_before, fen_after, move_played_uci, time_limi
         getattr(move_played_uci, "uci", lambda: None)() or ""
     )
     try:
-        after_result = get_pv_from_fen(engine, fen_after, time_limit=time_limit, min_depth=16)
+        after_result = get_pv_from_fen(engine, fen_after, time_limit=time_limit, min_depth=MIN_PV_PLIES)
         continuation_variation = []
         continuation_evals = []
         if move_uci:
@@ -477,7 +481,7 @@ def compute_mistake_pv(engine, fen_before, fen_after, move_played_uci, time_limi
         continuation_variation.extend(after_result["variation"])
         continuation_evals.extend(after_result["evals"])
 
-        before_result = get_pv_from_fen(engine, fen_before, time_limit=time_limit, min_depth=16)
+        before_result = get_pv_from_fen(engine, fen_before, time_limit=time_limit, min_depth=MIN_PV_PLIES)
         best_variation = before_result["variation"]
         best_evals = before_result["evals"]
 
@@ -562,14 +566,12 @@ async def analyze_job_status(job_id: str, since: int = 0):
             raise HTTPException(status_code=404, detail="Unknown job id")
 
         logs: List[str] = job.get("logs") or []
-        start = max(0, int(since))
-        new_logs = logs[start:]
         next_index = len(logs)
 
         payload: Dict[str, Any] = {
             "job_id": job_id,
             "status": job.get("status"),
-            "logs": new_logs,
+            "logs": list(logs),
             "next": next_index,
             "error": job.get("error"),
         }
@@ -703,8 +705,8 @@ async def analyze_mistake_fens(request: AnalyzeFensRequest):
         )
 
     try:
-        # 1. Mistake board: PV from FEN after mistake
-        after_result = get_pv_from_fen(engine, request.fen_after_mistake, time_limit=1.0, min_depth=16)
+        # 1. Mistake board: PV from FEN after mistake (at least 10 full moves)
+        after_result = get_pv_from_fen(engine, request.fen_after_mistake, time_limit=1.0, min_depth=MIN_PV_PLIES)
         
         # Build continuation: mistake move first, then PV from after mistake
         continuation_variation = []
@@ -734,8 +736,8 @@ async def analyze_mistake_fens(request: AnalyzeFensRequest):
         continuation_variation.extend(after_result["variation"])
         continuation_evals.extend(after_result["evals"])
         
-        # 2. Best alternative board: PV from FEN before mistake
-        before_result = get_pv_from_fen(engine, request.fen_before_mistake, time_limit=1.0, min_depth=16)
+        # 2. Best alternative board: PV from FEN before mistake (at least 10 full moves)
+        before_result = get_pv_from_fen(engine, request.fen_before_mistake, time_limit=1.0, min_depth=MIN_PV_PLIES)
         
         best_variation = before_result["variation"]
         best_evals = before_result["evals"]

@@ -39,8 +39,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const replayNextBtn = document.getElementById('replay-next');
 
   function formatEval(evalCp) {
-    if (evalCp == null || isNaN(evalCp)) return 'N/A';
-    const pawns = evalCp / 100.0;
+    const n = evalCp != null ? Number(evalCp) : null;
+    if (n == null || isNaN(n)) return '—';
+    const pawns = n / 100.0;
     return pawns.toFixed(1);
   }
 
@@ -317,12 +318,10 @@ document.addEventListener('DOMContentLoaded', () => {
         fetch(`/api/analyze-job/${job_id}?since=${since}`)
           .then((r) => r.json())
           .then((payload) => {
-            const newLogs = payload.logs || [];
-            if (newLogs.length) {
-              since = payload.next != null ? payload.next : since + newLogs.length;
-              allLogs = allLogs.concat(newLogs);
-              updateStatusFromLogs(allLogs);
-            }
+            const fullLogs = payload.logs || [];
+            since = payload.next != null ? payload.next : since;
+            allLogs = fullLogs;
+            updateStatusFromLogs(allLogs);
             if (payload.status === 'done') {
               clearInterval(intervalId);
               if (analysisStatusDiv) {
@@ -745,6 +744,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function showMistakeDetails(mistake, mistakeIndex) {
     const details = document.getElementById('mistake-details');
+    if (!details) return;
     details.innerHTML = '';
 
     const view = document.createElement('div');
@@ -815,8 +815,6 @@ document.addEventListener('DOMContentLoaded', () => {
         startEval = analysisData.start_eval != null ? analysisData.start_eval : null;
       }
 
-      if (loadingDiv.parentNode) loadingDiv.remove();
-
       // Left board: Mistake continuation
       // The continuationMoves from backend already includes the mistake move as first move
       const leftSection = createBoardSection(
@@ -871,8 +869,18 @@ document.addEventListener('DOMContentLoaded', () => {
       drawEvalPlot(canvas, startEval, continuationEvals, bestEvals);
       
       view.appendChild(plotContainer);
+      if (loadingDiv.parentNode) loadingDiv.remove();
     } catch (error) {
-      loadingDiv.textContent = 'Error analyzing mistake: ' + error.message;
+      if (loadingDiv.parentNode) {
+        loadingDiv.textContent = 'Error analyzing mistake: ' + error.message;
+      } else {
+        const errEl = document.createElement('div');
+        errEl.className = 'mistake-error';
+        errEl.style.padding = '1rem';
+        errEl.style.color = '#ff7675';
+        errEl.textContent = 'Error analyzing mistake: ' + error.message;
+        view.appendChild(errEl);
+      }
       console.error('Error analyzing mistake:', error);
     }
   }
@@ -1093,6 +1101,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const section = document.createElement('div');
     section.className = 'board-section';
 
+    if (title) {
+      const caption = document.createElement('div');
+      caption.className = 'board-section-caption';
+      caption.style.fontWeight = '600';
+      caption.style.marginBottom = '0.5rem';
+      caption.style.color = '#f5f6fa';
+      caption.textContent = title;
+      section.appendChild(caption);
+    }
+
     const boardWithEval = document.createElement('div');
     boardWithEval.className = 'board-with-eval';
 
@@ -1279,8 +1297,9 @@ document.addEventListener('DOMContentLoaded', () => {
       if (currentIndex === 0) {
         board.position(startFen);
         boardInfo.textContent = 'Position before the mistake.';
-        materialInfo.textContent = startEval != null ? 'Eval: ' + formatEval(startEval) : 'Eval: —';
-        setEvalBar(barWrap, startEval);
+        const startCp = startEval != null ? Number(startEval) : null;
+        materialInfo.textContent = startCp != null && !isNaN(startCp) ? 'Eval: ' + formatEval(startCp) : 'Eval: —';
+        setEvalBar(barWrap, startCp);
         arrowsOverlay.innerHTML = '';
       } else {
         for (let i = 0; i < currentIndex && i < moveUcis.length; i++) {
@@ -1289,7 +1308,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         board.position(chess.fen());
         const evalIdx = currentIndex - 1;
-        const cp = evals[evalIdx] != null ? evals[evalIdx] : null;
+        const raw = evals[evalIdx];
+        const cp = raw != null ? Number(raw) : null;
         
         // Format move display: pair white and black moves together
         let moveText = '';
@@ -1314,7 +1334,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         
         boardInfo.textContent = moveText;
-        materialInfo.textContent = 'Eval: ' + formatEval(cp);
+        materialInfo.textContent = (cp != null && !isNaN(cp)) ? 'Eval: ' + formatEval(cp) : 'Eval: —';
         setEvalBar(barWrap, cp);
 
         const lastUci = moveUcis[currentIndex - 1];
