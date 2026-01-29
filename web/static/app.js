@@ -251,46 +251,110 @@ document.addEventListener('DOMContentLoaded', () => {
     if (replayCard) replayCard.style.display = 'none';
 
     try {
-      if (analysisStatusDiv) analysisStatusDiv.textContent = 'Analyzing game moves with Stockfish...';
-      const resp = await fetch('/api/analyze', {
+      // Start analysis job so we can stream progress (moves analyzed)
+      const startResp = await fetch('/api/analyze-job', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pgn }),
       });
-      console.log('Response status:', resp.status);
-      if (!resp.ok) {
-        const data = await resp.json().catch(() => ({}));
-        const errorMsg = 'Error: ' + (data.detail || resp.statusText);
-        console.error('API error:', errorMsg);
+      if (!startResp.ok) {
+        const errData = await startResp.json().catch(() => ({}));
+        const errorMsg = 'Error: ' + (errData.detail || startResp.statusText);
         resultDiv.textContent = errorMsg;
-        if (analysisStatusDiv) {
-          analysisStatusDiv.textContent = 'Analysis failed: ' + errorMsg;
-        }
+        if (analysisStatusDiv) analysisStatusDiv.textContent = 'Analysis failed: ' + errorMsg;
         return;
       }
-      if (analysisStatusDiv) analysisStatusDiv.textContent = 'Analyzing mistakes...';
-      const data = await resp.json();
-      console.log('Analysis complete, rendering results');
-      if (analysisStatusDiv) analysisStatusDiv.textContent = 'Analysis complete! Rendering results...';
-      currentAnalysisData = data;
-      currentPgn = pgn; // Store PGN for mistake analysis
-      renderResult(data);
+      const { job_id } = await startResp.json();
+      let since = 0;
+      let allLogs = [];
+      const pollIntervalMs = 400;
+
+      function updateStatusFromLogs(logs) {
+        if (!analysisStatusDiv) return;
+        if (!logs.length) {
+          analysisStatusDiv.textContent = 'Analyzing game...';
+          return;
+        }
+        let lastMoveProgress = null;
+        for (let i = logs.length - 1; i >= 0; i--) {
+          const m = logs[i].match(/Analyzed move (\d+)\/(\d+)/);
+          if (m) {
+            lastMoveProgress = { current: parseInt(m[1], 10), total: parseInt(m[2], 10) };
+            break;
+          }
+        }
+        const analyzingMistakes = logs.some(l => l.indexOf('Analyzing mistakes') !== -1);
+        const complete = logs.some(l => l.indexOf('Analysis complete') !== -1);
+        const foundMistakes = logs.find(l => /Found \d+ mistakes?\./.test(l));
+        let text = '';
+        if (lastMoveProgress) {
+          text = `Analyzing moves: ${lastMoveProgress.current} of ${lastMoveProgress.total}`;
+          if (analyzingMistakes) text += '\nAnalyzing mistakes...';
+          else if (complete) text += '\nAnalysis complete.';
+          if (foundMistakes) text += '\n' + foundMistakes.trim();
+        } else if (analyzingMistakes) {
+          text = 'Analyzing mistakes...';
+          if (foundMistakes) text += '\n' + foundMistakes.trim();
+        } else {
+          text = logs.slice(-3).join('\n') || 'Analyzing game...';
+        }
+        analysisStatusDiv.textContent = text;
+      }
+
+      const poll = () =>
+        fetch(`/api/analyze-job/${job_id}?since=${since}`)
+          .then((r) => r.json())
+          .then((payload) => {
+            const newLogs = payload.logs || [];
+            if (newLogs.length) {
+              since = payload.next != null ? payload.next : since + newLogs.length;
+              allLogs = allLogs.concat(newLogs);
+              updateStatusFromLogs(allLogs);
+            }
+            if (payload.status === 'done') {
+              clearInterval(intervalId);
+              if (analysisStatusDiv) {
+                analysisStatusDiv.textContent = 'Analysis complete! Rendering results...';
+                analysisStatusDiv.style.display = 'none';
+              }
+              const data = payload.result;
+              if (!data) {
+                resultDiv.textContent = 'Analysis finished but no result received.';
+                return;
+              }
+              currentAnalysisData = data;
+              currentPgn = pgn;
+              renderResult(data);
+              return;
+            }
+            if (payload.status === 'error') {
+              clearInterval(intervalId);
+              const errorMsg = payload.error || 'Analysis failed.';
+              resultDiv.textContent = errorMsg;
+              if (analysisStatusDiv) analysisStatusDiv.textContent = 'Error: ' + errorMsg;
+              return;
+            }
+          })
+          .catch((e) => {
+            clearInterval(intervalId);
+            if (typeof console !== 'undefined' && console.error) console.error('Poll error:', e);
+            resultDiv.textContent = 'Error: ' + e.message;
+            if (analysisStatusDiv) analysisStatusDiv.textContent = 'Error: ' + e.message;
+          });
+
+      const intervalId = setInterval(poll, pollIntervalMs);
+      poll();
     } catch (e) {
       if (typeof console !== 'undefined' && console.error) console.error('Exception during analysis:', e);
       if (resultDiv) resultDiv.textContent = 'Error: ' + e.message;
-      if (analysisStatusDiv) {
-        analysisStatusDiv.textContent = 'Error: ' + e.message;
-      }
+      if (analysisStatusDiv) analysisStatusDiv.textContent = 'Error: ' + e.message;
     } finally {
       isAnalyzing = false;
       if (analyzeBtn) {
         analyzeBtn.disabled = false;
         analyzeBtn.textContent = 'Analyze Game';
       }
-      // Always hide analysis status div in finally block
-      if (analysisStatusDiv) {
-        analysisStatusDiv.style.display = 'none';
-      }
+      // Status div is hidden in the poll callback when status === 'done'; keep visible while polling for progress
     }
   }
 
