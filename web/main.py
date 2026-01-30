@@ -552,6 +552,35 @@ def _feedback_file_path() -> str:
     return os.path.join(data_dir, "feedback.jsonl")
 
 
+@app.get("/api/feedback")
+async def get_feedback():
+    """
+    Return all feedback entries for public display (comment + date only, no email).
+    Newest first.
+    """
+    path = _feedback_file_path()
+    entries: List[Dict[str, Any]] = []
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        entries.append({
+                            "ts": obj.get("ts"),
+                            "comment": (obj.get("comment") or "").strip(),
+                        })
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+        except OSError:
+            pass
+    entries.sort(key=lambda x: (x.get("ts") or 0), reverse=True)
+    return {"feedback": entries}
+
+
 @app.get("/feedback")
 async def feedback_page():
     """Serve the feedback/suggestions page."""

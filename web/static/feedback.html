@@ -27,6 +27,11 @@
       </form>
       <div id="feedback-message" class="feedback-message" style="display: none;"></div>
     </div>
+    <div class="card">
+      <h2>Suggestions &amp; comments</h2>
+      <p>What others have suggested. Add yours above.</p>
+      <div id="feedback-list" class="feedback-list">Loading…</div>
+    </div>
     <p><a href="/">← Back to analysis</a></p>
   </div>
   <script>
@@ -63,7 +68,33 @@
       }
       msgEl.style.display = 'block';
       btn.disabled = false;
+      if (r.ok) loadFeedbackList();
     });
+
+    function formatDate(ts) {
+      if (ts == null) return '—';
+      const d = new Date(ts * 1000);
+      return d.toLocaleDateString(undefined, { dateStyle: 'medium' }) + ' ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    }
+    function loadFeedbackList() {
+      const el = document.getElementById('feedback-list');
+      if (!el) return;
+      fetch('/api/feedback').then(function (r) { return r.json(); }).then(function (data) {
+        const list = (data && data.feedback) || [];
+        if (list.length === 0) {
+          el.innerHTML = '<p class="feedback-list-empty">No suggestions yet. Be the first!</p>';
+          return;
+        }
+        el.innerHTML = '<ul class="feedback-entries">' + list.map(function (item) {
+          const date = formatDate(item.ts);
+          const comment = (item.comment || '').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
+          return '<li class="feedback-entry"><span class="feedback-entry-date">' + date + '</span><div class="feedback-entry-comment">' + comment + '</div></li>';
+        }).join('') + '</ul>';
+      }).catch(function () {
+        el.innerHTML = '<p class="feedback-list-empty">Could not load suggestions.</p>';
+      });
+    }
+    loadFeedbackList();
   </script>
 </body>
 </html>
