@@ -780,6 +780,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let hasStoredPv = (continuationMoves[0] && continuationMoves[0].variation && continuationMoves[0].variation.length) ||
       (bestMoves[0] && bestMoves[0].variation && bestMoves[0].variation.length);
+    const hasEvals = (continuationEvals.length > 0 && continuationEvals.some(e => e != null)) ||
+      (bestEvals.length > 0 && bestEvals.some(e => e != null)) ||
+      (startEval != null && !isNaN(Number(startEval)));
     if (!hasStoredPv) view.appendChild(loadingDiv);
     details.appendChild(view);
 
@@ -791,26 +794,36 @@ document.addEventListener('DOMContentLoaded', () => {
         throw new Error('Mistake data incomplete');
       }
 
-      if (!hasStoredPv && currentJobId) {
+      // Fetch from job when we need moves and/or evals (background may have filled evals later)
+      if (currentJobId && (!hasStoredPv || !hasEvals)) {
         try {
           const jobResp = await fetch(`/api/analyze-job/${currentJobId}`);
           const jobPayload = await parseJsonResponse(jobResp, null);
           if (jobPayload && jobPayload.result && jobPayload.result.mistakes && jobPayload.result.mistakes[mistakeIndex]) {
             const updated = jobPayload.result.mistakes[mistakeIndex];
-            if (updated.continuation_evals && updated.continuation_evals.length) {
+            const gotMoves = updated.continuation_moves?.[0]?.variation?.length || updated.best_moves?.[0]?.variation?.length;
+            const gotEvals = (updated.continuation_evals?.length > 0 && updated.continuation_evals.some(e => e != null)) ||
+              (updated.best_evals?.length > 0 && updated.best_evals.some(e => e != null));
+            if (gotMoves) {
+              if (updated.continuation_moves) continuationMoves = updated.continuation_moves;
+              if (updated.best_moves) bestMoves = updated.best_moves;
+              hasStoredPv = true;
+            }
+            if (gotEvals) {
               continuationEvals = updated.continuation_evals || [];
               bestEvals = updated.best_evals || [];
-              continuationMoves = updated.continuation_moves || [];
-              bestMoves = updated.best_moves || [];
               startEval = updated.start_eval != null ? updated.start_eval : null;
-              hasStoredPv = true;
-              currentAnalysisData = jobPayload.result;
             }
+            if (jobPayload.result) currentAnalysisData = jobPayload.result;
           }
         } catch (e) { /* ignore */ }
       }
 
-      if (!hasStoredPv) {
+      // If we still lack moves or evals, call on-demand API (always returns both)
+      const stillNeedData = !hasStoredPv || !((continuationEvals.length > 0 && continuationEvals.some(e => e != null)) ||
+        (bestEvals.length > 0 && bestEvals.some(e => e != null)) ||
+        (startEval != null && !isNaN(Number(startEval))));
+      if (stillNeedData) {
         const resp = await fetch('/api/analyze-mistake-fens', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
