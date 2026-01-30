@@ -276,7 +276,21 @@ def serialize_best_moves(best_moves):
     return out
 
 
-def get_evals_for_fens(engine, fens, time_limit=0.15):
+def _score_from_info(info):
+    """Extract centipawn eval from engine analyse result (handles list or single dict)."""
+    if info is None:
+        return None
+    inf = info[0] if isinstance(info, list) and info else info
+    if not isinstance(inf, dict) or "score" not in inf:
+        return None
+    try:
+        score = inf["score"].white().score(mate_score=10000)
+        return int(score) if score is not None else None
+    except (TypeError, AttributeError):
+        return None
+
+
+def get_evals_for_fens(engine, fens, time_limit=0.2):
     """Run engine on each FEN and return list of centipawn evals (White's perspective)."""
     evals = []
     for fen in fens:
@@ -286,8 +300,8 @@ def get_evals_for_fens(engine, fens, time_limit=0.15):
         try:
             board = chess.Board(fen)
             info = engine.analyse(board, chess.engine.Limit(time=time_limit))
-            score = info["score"].white().score(mate_score=10000)
-            evals.append(score if score is not None else None)
+            score = _score_from_info(info)
+            evals.append(score)
         except Exception:
             evals.append(None)
     return evals
@@ -472,10 +486,8 @@ def compute_mistake_pv(engine, fen_before, fen_after, move_played_uci, time_limi
                         "move_san": board_before.san(move)
                     })
                     board_after = chess.Board(fen_after)
-                    info = engine.analyse(board_after, chess.engine.Limit(time=0.15))
-                    info_one = info[0] if isinstance(info, list) else info
-                    score = info_one["score"].white().score(mate_score=10000)
-                    continuation_evals.append(score if score is not None else None)
+                    info = engine.analyse(board_after, chess.engine.Limit(time=0.2))
+                    continuation_evals.append(_score_from_info(info))
             except Exception:
                 pass
         continuation_variation.extend(after_result["variation"])
@@ -488,10 +500,8 @@ def compute_mistake_pv(engine, fen_before, fen_after, move_played_uci, time_limi
         start_eval = None
         try:
             board_start = chess.Board(fen_before)
-            info_start = engine.analyse(board_start, chess.engine.Limit(time=0.15))
-            info_one = info_start[0] if isinstance(info_start, list) else info_start
-            score_start = info_one["score"].white().score(mate_score=10000)
-            start_eval = score_start if score_start is not None else None
+            info_start = engine.analyse(board_start, chess.engine.Limit(time=0.2))
+            start_eval = _score_from_info(info_start)
         except Exception:
             pass
 
@@ -725,9 +735,8 @@ async def analyze_mistake_fens(request: AnalyzeFensRequest):
                     })
                     # Get eval for position after mistake move (this is the position after the mistake)
                     board_after = chess.Board(request.fen_after_mistake)
-                    info = engine.analyse(board_after, chess.engine.Limit(time=0.15))
-                    score = info["score"].white().score(mate_score=10000)
-                    continuation_evals.append(score if score is not None else None)
+                    info = engine.analyse(board_after, chess.engine.Limit(time=0.2))
+                    continuation_evals.append(_score_from_info(info))
             except Exception as e:
                 print(f"Error adding mistake move: {e}")
         
@@ -746,9 +755,8 @@ async def analyze_mistake_fens(request: AnalyzeFensRequest):
         start_eval = None
         try:
             board_start = chess.Board(request.fen_before_mistake)
-            info_start = engine.analyse(board_start, chess.engine.Limit(time=0.15))
-            score_start = info_start["score"].white().score(mate_score=10000)
-            start_eval = score_start if score_start is not None else None
+            info_start = engine.analyse(board_start, chess.engine.Limit(time=0.2))
+            start_eval = _score_from_info(info_start)
         except Exception as e:
             print(f"Error getting start eval: {e}")
         
