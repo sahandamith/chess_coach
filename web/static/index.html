@@ -15,8 +15,18 @@
   <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
 </head>
 <body>
+  <header class="site-header">
+    <h1>Chess Coach</h1>
+    <nav>
+      <a href="/">Analyze</a>
+      <a href="/feedback">Feedback &amp; suggestions</a>
+    </nav>
+  </header>
   <div class="container">
-    <h1>Chess Coach (Web)</h1>
+    <div class="value-proposition">
+      <p class="value-lead">This tool <strong>analyzes your game for mistakes</strong> and shows the <strong>best alternative lines</strong> with evaluations—for free.</p>
+      <p class="value-note">On Chess.com, full game review and multiple analyses are a paid feature. Here you get mistake detection and best-line comparison at no cost. Paste any PGN and go.</p>
+    </div>
     <div class="card">
       <h2>1. Paste your PGN</h2>
       <form id="pgn-form" onsubmit="return false;">
@@ -77,6 +87,9 @@
 
     <!-- Positions debug card no longer needed -->
     <p class="app-version" title="If you don't see v4 after deploy, hard-refresh (Ctrl+Shift+R) or clear cache.">App version: 4</p>
+    <footer class="site-footer">
+      <a href="/feedback">Send feedback or suggestions to improve this tool</a>
+    </footer>
   </div>
 
   <script src="/static/app.js?v=4"></script>

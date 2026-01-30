@@ -6,6 +6,66 @@ body {
   padding: 0;
 }
 
+.site-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 1rem;
+  padding: 1rem 1.5rem;
+  background: #2f3640;
+  border-bottom: 1px solid #4b4b4b;
+}
+.site-header h1 {
+  margin: 0;
+  font-size: 1.5rem;
+}
+.site-header nav {
+  display: flex;
+  gap: 1.25rem;
+}
+.site-header nav a {
+  color: #74b9ff;
+  text-decoration: none;
+  font-weight: 500;
+}
+.site-header nav a:hover {
+  text-decoration: underline;
+}
+
+.value-proposition {
+  background: linear-gradient(135deg, #2d3436 0%, #1e272e 100%);
+  border: 1px solid #4b4b4b;
+  border-radius: 8px;
+  padding: 1.25rem 1.5rem;
+  margin-bottom: 1.5rem;
+}
+.value-proposition .value-lead {
+  margin: 0 0 0.5rem 0;
+  font-size: 1.05rem;
+  line-height: 1.5;
+}
+.value-proposition .value-note {
+  margin: 0;
+  font-size: 0.95rem;
+  color: #b2bec3;
+  line-height: 1.45;
+}
+
+.site-footer {
+  margin-top: 2rem;
+  padding-top: 1rem;
+  border-top: 1px solid #4b4b4b;
+  text-align: center;
+}
+.site-footer a {
+  color: #74b9ff;
+  text-decoration: none;
+}
+.site-footer a:hover {
+  text-decoration: underline;
+}
+
 .container {
   max-width: 1100px;
   margin: 0 auto;
@@ -22,6 +82,45 @@ h1, h2, h3 {
   padding: 1rem 1.25rem;
   margin-bottom: 1rem;
   box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+
+/* Feedback page */
+.feedback-form label {
+  display: block;
+  margin-top: 1rem;
+  margin-bottom: 0.25rem;
+  font-weight: 500;
+}
+.feedback-form label:first-of-type { margin-top: 0; }
+.feedback-form input[type="email"] {
+  width: 100%;
+  max-width: 320px;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  border: 1px solid #4b4b4b;
+  background: #1e272e;
+  color: #f5f6fa;
+}
+.feedback-form textarea {
+  font-family: inherit;
+}
+.feedback-form button {
+  margin-top: 1rem;
+}
+.feedback-message {
+  margin-top: 1rem;
+  padding: 0.75rem;
+  border-radius: 6px;
+}
+.feedback-message-success {
+  background: rgba(0, 200, 100, 0.2);
+  border: 1px solid rgba(0, 200, 100, 0.5);
+  color: #55efc4;
+}
+.feedback-message-error {
+  background: rgba(255, 100, 100, 0.2);
+  border: 1px solid rgba(255, 100, 100, 0.5);
+  color: #ff7675;
 }
 
 /* Sections 2, 3, 4 hidden until analysis completes */

@@ -22,3 +22,6 @@ Thumbs.db
 
 # Project specific
 *.log
+
+# User feedback (stored locally by the web app)
+web/data/

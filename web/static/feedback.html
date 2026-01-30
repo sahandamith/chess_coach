@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Feedback &amp; suggestions – Chess Coach</title>
+  <link rel="stylesheet" href="/static/style.css?v=5" />
+</head>
+<body>
+  <header class="site-header">
+    <h1>Chess Coach</h1>
+    <nav>
+      <a href="/">Analyze</a>
+      <a href="/feedback">Feedback &amp; suggestions</a>
+    </nav>
+  </header>
+  <div class="container">
+    <div class="card">
+      <h2>Feedback &amp; suggestions</h2>
+      <p>Your ideas help improve this tool. Tell us what you’d like to see: new features, clearer explanations, or fixes.</p>
+      <form id="feedback-form" class="feedback-form">
+        <label for="feedback-comment">Comment or suggestion</label>
+        <textarea id="feedback-comment" name="comment" required rows="5" placeholder="e.g. Add support for batch analysis, or: the mistake labels could show the move number..."></textarea>
+        <label for="feedback-email">Email (optional, if you want a reply)</label>
+        <input type="email" id="feedback-email" name="email" placeholder="you@example.com" />
+        <button type="submit" id="feedback-submit">Send feedback</button>
+      </form>
+      <div id="feedback-message" class="feedback-message" style="display: none;"></div>
+    </div>
+    <p><a href="/">← Back to analysis</a></p>
+  </div>
+  <script>
+    document.getElementById('feedback-form').addEventListener('submit', async function (e) {
+      e.preventDefault();
+      const comment = document.getElementById('feedback-comment').value.trim();
+      const email = document.getElementById('feedback-email').value.trim() || null;
+      const msgEl = document.getElementById('feedback-message');
+      const btn = document.getElementById('feedback-submit');
+      if (!comment) return;
+      btn.disabled = true;
+      msgEl.style.display = 'none';
+      try {
+        const r = await fetch('/api/feedback', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ comment: comment, email: email })
+        });
+        const text = await r.text();
+        let data = null;
+        try { data = text ? JSON.parse(text) : null; } catch (_) {}
+        if (r.ok) {
+          msgEl.textContent = 'Thanks! Your feedback was sent.';
+          msgEl.className = 'feedback-message feedback-message-success';
+          document.getElementById('feedback-comment').value = '';
+          document.getElementById('feedback-email').value = '';
+        } else {
+          msgEl.textContent = data && data.detail ? data.detail : 'Something went wrong. Please try again.';
+          msgEl.className = 'feedback-message feedback-message-error';
+        }
+      } catch (err) {
+        msgEl.textContent = 'Network error. Please try again.';
+        msgEl.className = 'feedback-message feedback-message-error';
+      }
+      msgEl.style.display = 'block';
+      btn.disabled = false;
+    });
+  </script>
+</body>
+</html>

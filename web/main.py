@@ -538,6 +538,60 @@ class AnalyzeFensRequest(BaseModel):
     move_played_uci: str  # The mistake move UCI
 
 
+class FeedbackRequest(BaseModel):
+    comment: str
+    email: Optional[str] = None
+
+
+def _feedback_file_path() -> str:
+    data_dir = os.path.join(os.path.dirname(__file__), "data")
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+    except OSError:
+        pass
+    return os.path.join(data_dir, "feedback.jsonl")
+
+
+@app.get("/feedback")
+async def feedback_page():
+    """Serve the feedback/suggestions page."""
+    path = os.path.join(STATIC_DIR, "feedback.html")
+    if os.path.isfile(path):
+        return FileResponse(
+            path,
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
+    raise HTTPException(status_code=404, detail="Feedback page not found")
+
+
+@app.post("/api/feedback")
+async def submit_feedback(request: FeedbackRequest):
+    """
+    Store user feedback/suggestions for future improvements.
+    Appends to a local file (one JSON object per line).
+    """
+    comment = (request.comment or "").strip()
+    if not comment:
+        raise HTTPException(status_code=400, detail="Comment is required")
+    email = (request.email or "").strip() or None
+    path = _feedback_file_path()
+    entry = {
+        "ts": time.time(),
+        "comment": comment[:2000],
+        "email": email[:256] if email else None,
+    }
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Could not save feedback: {e}")
+    return {"ok": True, "message": "Thank you for your feedback."}
+
+
 @app.post("/api/analyze-job")
 async def analyze_job(request: AnalyzeRequest):
     """
