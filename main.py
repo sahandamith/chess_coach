@@ -1,6 +1,6 @@
 """
 Chess Coach Web API – FastAPI app for game analysis and mistake review.
-Designed to run on Render.com or any ASGI host.
+Designed to run on any ASGI host.
 """
 import os
 import sys
@@ -693,7 +693,7 @@ async def index():
 
 @app.get("/health")
 async def health():
-    """Health check for Render and load balancers."""
+    """Health check for load balancers."""
     return {"status": "ok"}
 
 
