@@ -16,7 +16,7 @@ class ChessAnalyzer:
     A class to analyze chess games using a UCI-compatible chess engine (e.g., Stockfish).
     """
     
-    def __init__(self, engine_path, move_time_ms=500, depth=22):
+    def __init__(self, engine_path, move_time_ms=500, depth=22, analyze_color='white'):
         """
         Initialize the ChessAnalyzer.
 
@@ -24,10 +24,12 @@ class ChessAnalyzer:
             engine_path: Path to the chess engine executable (e.g., Stockfish)
             move_time_ms: Time limit per move analysis in milliseconds (fallback)
             depth: Analysis depth (default 22) - deeper = more accurate but slower
+            analyze_color: Which side to analyze - 'white', 'black', or 'both'
         """
         self.engine_path = engine_path
         self.move_time_ms = move_time_ms
         self.depth = depth
+        self.analyze_color = analyze_color.lower()  # 'white', 'black', or 'both'
         self.engine = None
         self.analysis_results = []
         self.mistake_analyses = []  # Detailed mistake analyses
@@ -273,25 +275,35 @@ class ChessAnalyzer:
             is_white_move = (i % 2 == 0)  # Even indices (0, 2, 4...) are White's moves
             game_phase = self.get_game_phase(board)
             thresholds = self.get_mistake_threshold(game_phase)
+            tactics = []
 
             if isinstance(prev_eval, (int, float)) and isinstance(score, (int, float)):
                 # Calculate delta for all moves
                 delta_eval = score - prev_eval
 
-                # Analyze BOTH colors (not just White)
-                # From the moving player's perspective: negative delta = position got worse
-                drop = -delta_eval if is_white_move else delta_eval
+                # Check if we should analyze this move
+                should_analyze = False
+                if self.analyze_color == 'white' and is_white_move:
+                    should_analyze = True
+                elif self.analyze_color == 'black' and not is_white_move:
+                    should_analyze = True
+                elif self.analyze_color == 'both':
+                    should_analyze = True
 
-                # Categorize based on game phase thresholds
-                if drop > thresholds['blunder']:
-                    mistake_category = "Blunder"
-                elif drop > thresholds['mistake']:
-                    mistake_category = "Mistake"
-                elif drop > thresholds['inaccuracy']:
-                    mistake_category = "Inaccuracy"
+                if should_analyze:
+                    # From the moving player's perspective: negative delta = position got worse
+                    drop = -delta_eval if is_white_move else delta_eval
 
-                # Detect tactical threats
-                tactics = self.detect_tactical_threats(board, prev_eval, score, move) if mistake_category else []
+                    # Categorize based on game phase thresholds
+                    if drop > thresholds['blunder']:
+                        mistake_category = "Blunder"
+                    elif drop > thresholds['mistake']:
+                        mistake_category = "Mistake"
+                    elif drop > thresholds['inaccuracy']:
+                        mistake_category = "Inaccuracy"
+
+                    # Detect tactical threats
+                    tactics = self.detect_tactical_threats(board, prev_eval, score, move) if mistake_category else []
             
             self.analysis_results.append({
                 'fen': board.fen(),

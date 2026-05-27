@@ -150,7 +150,7 @@ def _background_mistake_pv(job_id: str, engine_path: str) -> None:
                 pass
 
 
-def _run_analysis_job(job_id: str, pgn_string: str) -> None:
+def _run_analysis_job(job_id: str, pgn_string: str, analyze_color: str = "white") -> None:
     from chess_engine.analyzer import ChessAnalyzer
 
     with _ANALYSIS_JOBS_LOCK:
@@ -169,7 +169,7 @@ def _run_analysis_job(job_id: str, pgn_string: str) -> None:
         sys.stdout = _JobLogStream(job_id)  # type: ignore[assignment]
         sys.stderr = _JobLogStream(job_id)  # type: ignore[assignment]
         try:
-            analyzer = ChessAnalyzer(engine_path, depth=20)
+            analyzer = ChessAnalyzer(engine_path, depth=20, analyze_color=analyze_color)
             analyzer.open_engine()
 
             if not analyzer.load_pgn_string(pgn_string):
@@ -543,6 +543,7 @@ def compute_mistake_pv(engine, fen_before, fen_after, move_played_uci, time_limi
 
 class AnalyzeRequest(BaseModel):
     pgn: str
+    analyze_color: str = "white"  # 'white', 'black', or 'both'
 
 
 class AnalyzeMistakeRequest(BaseModel):
@@ -649,6 +650,10 @@ async def analyze_job(request: AnalyzeRequest):
     if not pgn_string:
         raise HTTPException(status_code=400, detail="PGN string is required")
 
+    analyze_color = (request.analyze_color or "white").lower()
+    if analyze_color not in ["white", "black", "both"]:
+        analyze_color = "white"
+
     job_id = uuid.uuid4().hex
     with _ANALYSIS_JOBS_LOCK:
         _ANALYSIS_JOBS[job_id] = {
@@ -657,9 +662,10 @@ async def analyze_job(request: AnalyzeRequest):
             "result": None,
             "error": None,
             "created_at": time.time(),
+            "analyze_color": analyze_color,
         }
 
-    t = threading.Thread(target=_run_analysis_job, args=(job_id, pgn_string), daemon=True)
+    t = threading.Thread(target=_run_analysis_job, args=(job_id, pgn_string, analyze_color), daemon=True)
     t.start()
 
     return {"job_id": job_id}

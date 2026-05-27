@@ -33,7 +33,13 @@
       <h2>1. Paste your PGN</h2>
       <form id="pgn-form" onsubmit="return false;">
         <textarea id="pgn" name="pgn" placeholder="Paste a single game PGN here..."></textarea>
-        <div style="margin-top: 0.75rem;">
+        <div style="margin-top: 0.75rem; display: flex; gap: 1rem; align-items: center;">
+          <label for="analyze-color" style="margin: 0;">Analyze:</label>
+          <select id="analyze-color" style="padding: 0.5rem;">
+            <option value="white">White's Mistakes</option>
+            <option value="black">Black's Mistakes</option>
+            <option value="both">Both Sides</option>
+          </select>
           <button type="button" id="analyze-btn">Analyze Game</button>
         </div>
       </form>

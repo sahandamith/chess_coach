@@ -274,10 +274,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     try {
       // Start analysis job so we can stream progress (moves analyzed)
+      const analyzeColor = document.getElementById('analyze-color')?.value || 'white';
       const startResp = await fetch(`${API_BASE}/api/analyze-job`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pgn }),
+        body: JSON.stringify({ pgn, analyze_color: analyzeColor }),
       });
       const startData = await parseJsonResponse(startResp, {});
       if (!startResp.ok) {
