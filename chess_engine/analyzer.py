@@ -213,7 +213,9 @@ class ChessAnalyzer:
         moves = list(self.game.mainline_moves())
         self.analysis_results = []
 
-        print("Analyzing game... this may take a moment.")
+        import sys
+        sys.stdout.write(f"Analyzing game ({len(moves)} moves)...\n")
+        sys.stdout.flush()
 
         # For the starting position, evaluation is always 0.0
         self.analysis_results.append({
@@ -324,7 +326,10 @@ class ChessAnalyzer:
             player = "White" if (i % 2 == 0) else "Black"
             # Print progress (every other move to avoid log spam)
             if (i + 1) % 2 == 0 or i == len(moves) - 1:  # Print every other move or at end
-                print(f"Analyzed move {chess_move:.1f}/{total_moves:.0f}: {player} {move_san}")
+                import sys
+                msg = f"Analyzed move {chess_move:.1f}/{total_moves:.0f}: {player} {move_san}\n"
+                sys.stdout.write(msg)
+                sys.stdout.flush()
 
         print("\nAnalysis complete.")
         return self.analysis_results
