@@ -240,11 +240,22 @@ def _run_analysis_job(job_id: str, pgn_string: str) -> None:
 
 def get_stockfish_path():
     """Resolve Stockfish executable path."""
-    # Try environment variable first (for Render/production)
+    # Try environment variable first
     env_path = os.environ.get("STOCKFISH_PATH")
     if env_path and os.path.isfile(env_path):
         return env_path
-    # Fallback to PATH (works in Docker and local systems)
+
+    # Check common Linux paths (for Docker/Render)
+    common_paths = [
+        "/usr/games/stockfish",
+        "/usr/bin/stockfish",
+        "/app/.venv/bin/stockfish",
+    ]
+    for path in common_paths:
+        if os.path.isfile(path):
+            return path
+
+    # Fallback to PATH
     return "stockfish"
 
 

@@ -1,7 +1,13 @@
 FROM python:3.11-slim
 
 # Install Stockfish
-RUN apt-get update && apt-get install -y stockfish && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && \
+    apt-get install -y stockfish && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Verify Stockfish installation
+RUN which stockfish || ls -la /usr/games/stockfish || echo "Stockfish not found in standard locations"
 
 WORKDIR /app
 
