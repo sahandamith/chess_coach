@@ -153,12 +153,24 @@ def _background_mistake_pv(job_id: str, engine_path: str) -> None:
 def _run_analysis_job(job_id: str, pgn_string: str, analyze_color: str = "white") -> None:
     from chess_engine.analyzer import ChessAnalyzer
 
+    def progress_callback(move_num, total_moves, move_san):
+        """Update job progress"""
+        with _ANALYSIS_JOBS_LOCK:
+            job = _ANALYSIS_JOBS.get(job_id)
+            if job:
+                job["progress"] = {
+                    "move_num": move_num,
+                    "total_moves": total_moves,
+                    "move_san": move_san
+                }
+
     with _ANALYSIS_JOBS_LOCK:
         job = _ANALYSIS_JOBS.get(job_id)
         if not job:
             return
         job["status"] = "running"
         job["started_at"] = time.time()
+        job["progress"] = {"move_num": 0, "total_moves": 0, "move_san": ""}
 
     engine_path = get_stockfish_path()
     analyzer = None
@@ -169,9 +181,8 @@ def _run_analysis_job(job_id: str, pgn_string: str, analyze_color: str = "white"
         sys.stdout = _JobLogStream(job_id)  # type: ignore[assignment]
         sys.stderr = _JobLogStream(job_id)  # type: ignore[assignment]
         try:
-            analyzer = ChessAnalyzer(engine_path, depth=20, analyze_color=analyze_color)
+            analyzer = ChessAnalyzer(engine_path, depth=20, analyze_color=analyze_color, progress_callback=progress_callback)
             analyzer.open_engine()
-            print("LOG TEST: Engine started", flush=True)
 
             if not analyzer.load_pgn_string(pgn_string):
                 raise ValueError("Invalid PGN")
@@ -692,6 +703,7 @@ async def analyze_job_status(job_id: str, since: int = 0):
             "logs": list(logs),
             "next": next_index,
             "error": job.get("error"),
+            "progress": job.get("progress"),  # Include progress info
         }
 
         if job.get("status") == "done":

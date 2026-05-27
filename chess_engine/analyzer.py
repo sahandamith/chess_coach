@@ -16,7 +16,7 @@ class ChessAnalyzer:
     A class to analyze chess games using a UCI-compatible chess engine (e.g., Stockfish).
     """
     
-    def __init__(self, engine_path, move_time_ms=500, depth=22, analyze_color='white'):
+    def __init__(self, engine_path, move_time_ms=500, depth=22, analyze_color='white', progress_callback=None):
         """
         Initialize the ChessAnalyzer.
 
@@ -25,11 +25,13 @@ class ChessAnalyzer:
             move_time_ms: Time limit per move analysis in milliseconds (fallback)
             depth: Analysis depth (default 22) - deeper = more accurate but slower
             analyze_color: Which side to analyze - 'white', 'black', or 'both'
+            progress_callback: Optional function(move_num, total_moves, move_san) to call for progress updates
         """
         self.engine_path = engine_path
         self.move_time_ms = move_time_ms
         self.depth = depth
         self.analyze_color = analyze_color.lower()  # 'white', 'black', or 'both'
+        self.progress_callback = progress_callback
         self.engine = None
         self.analysis_results = []
         self.mistake_analyses = []  # Detailed mistake analyses
@@ -213,9 +215,8 @@ class ChessAnalyzer:
         moves = list(self.game.mainline_moves())
         self.analysis_results = []
 
-        import sys
-        sys.stdout.write(f"Analyzing game ({len(moves)} moves)...\n")
-        sys.stdout.flush()
+        if self.progress_callback:
+            self.progress_callback(0, len(moves) // 2, "Starting...")
 
         # For the starting position, evaluation is always 0.0
         self.analysis_results.append({
@@ -324,12 +325,10 @@ class ChessAnalyzer:
             chess_move = (i + 1) / 2.0
             total_moves = len(moves) / 2.0
             player = "White" if (i % 2 == 0) else "Black"
-            # Print progress (every other move to avoid log spam)
-            if (i + 1) % 2 == 0 or i == len(moves) - 1:  # Print every other move or at end
-                import sys
-                msg = f"Analyzed move {chess_move:.1f}/{total_moves:.0f}: {player} {move_san}\n"
-                sys.stdout.write(msg)
-                sys.stdout.flush()
+            # Update progress (every other move to avoid spam)
+            if (i + 1) % 2 == 0 or i == len(moves) - 1:  # Every other move or at end
+                if self.progress_callback:
+                    self.progress_callback(int(chess_move), int(total_moves), f"{player} {move_san}")
 
         print("\nAnalysis complete.")
         return self.analysis_results

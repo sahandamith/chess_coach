@@ -334,7 +334,12 @@ document.addEventListener('DOMContentLoaded', () => {
           text = 'Analyzing mistakes...';
           if (foundMistakes) text += '\n' + foundMistakes.trim();
         } else {
-          text = logs.slice(-3).join('\n') || 'Analyzing game...';
+          // Show progress from API
+          text = 'Analyzing game...';
+          if (window.__lastProgress) {
+            const p = window.__lastProgress;
+            text = `Analyzed ${p.move_num}/${p.total_moves}: ${p.move_san}`;
+          }
         }
         analysisStatusDiv.textContent = text;
       }
@@ -347,6 +352,10 @@ document.addEventListener('DOMContentLoaded', () => {
             const fullLogs = payload.logs || [];
             since = payload.next != null ? payload.next : since;
             allLogs = fullLogs;
+            // Capture progress info from API response
+            if (payload.progress) {
+              window.__lastProgress = payload.progress;
+            }
             updateStatusFromLogs(allLogs);
             if (payload.status === 'done') {
               clearInterval(intervalId);
