@@ -171,6 +171,7 @@ def _run_analysis_job(job_id: str, pgn_string: str, analyze_color: str = "white"
         try:
             analyzer = ChessAnalyzer(engine_path, depth=20, analyze_color=analyze_color)
             analyzer.open_engine()
+            print("LOG TEST: Engine started", flush=True)
 
             if not analyzer.load_pgn_string(pgn_string):
                 raise ValueError("Invalid PGN")
