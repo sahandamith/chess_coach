@@ -229,15 +229,12 @@ def _run_analysis_job(job_id: str, pgn_string: str) -> None:
 
 
 def get_stockfish_path():
-    """Resolve Stockfish executable path (use your local path)."""
-    # Reuse your original local Stockfish path for development
-    path = r"C:\Users\sahan\Downloads\stockfish-windows-x86-64-avx2\stockfish\stockfish-windows-x86-64-avx2.exe"
-    if path and os.path.isfile(path):
-        return path
-    # Fallback to environment or PATH if needed
+    """Resolve Stockfish executable path."""
+    # Try environment variable first (for Render/production)
     env_path = os.environ.get("STOCKFISH_PATH")
     if env_path and os.path.isfile(env_path):
         return env_path
+    # Fallback to PATH (works in Docker and local systems)
     return "stockfish"
 
 
