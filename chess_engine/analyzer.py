@@ -16,16 +16,18 @@ class ChessAnalyzer:
     A class to analyze chess games using a UCI-compatible chess engine (e.g., Stockfish).
     """
     
-    def __init__(self, engine_path, move_time_ms=500):
+    def __init__(self, engine_path, move_time_ms=500, depth=22):
         """
         Initialize the ChessAnalyzer.
-        
+
         Args:
             engine_path: Path to the chess engine executable (e.g., Stockfish)
-            move_time_ms: Time limit per move analysis in milliseconds (default: 500)
+            move_time_ms: Time limit per move analysis in milliseconds (fallback)
+            depth: Analysis depth (default 22) - deeper = more accurate but slower
         """
         self.engine_path = engine_path
         self.move_time_ms = move_time_ms
+        self.depth = depth
         self.engine = None
         self.analysis_results = []
         self.mistake_analyses = []  # Detailed mistake analyses
@@ -99,6 +101,75 @@ class ChessAnalyzer:
             self.engine.quit()
             self.engine = None
             print("Chess engine closed.")
+
+    def get_game_phase(self, board):
+        """
+        Detect game phase: Opening, Middlegame, or Endgame.
+
+        Returns: 'Opening', 'Middlegame', or 'Endgame'
+        """
+        piece_count = len(board.pieces(chess.PAWN, chess.WHITE)) + \
+                      len(board.pieces(chess.QUEEN, chess.WHITE)) + \
+                      len(board.pieces(chess.ROOK, chess.WHITE)) + \
+                      len(board.pieces(chess.BISHOP, chess.WHITE)) + \
+                      len(board.pieces(chess.KNIGHT, chess.WHITE))
+        piece_count += len(board.pieces(chess.PAWN, chess.BLACK)) + \
+                       len(board.pieces(chess.QUEEN, chess.BLACK)) + \
+                       len(board.pieces(chess.ROOK, chess.BLACK)) + \
+                       len(board.pieces(chess.BISHOP, chess.BLACK)) + \
+                       len(board.pieces(chess.KNIGHT, chess.BLACK))
+
+        if piece_count > 16:
+            return 'Opening'
+        elif piece_count > 6:
+            return 'Middlegame'
+        else:
+            return 'Endgame'
+
+    def get_mistake_threshold(self, game_phase):
+        """
+        Get mistake thresholds based on game phase.
+        Endgames are more critical, openings more forgiving.
+
+        Returns: {'blunder': cp, 'mistake': cp, 'inaccuracy': cp}
+        """
+        thresholds = {
+            'Opening': {'blunder': 300, 'mistake': 150, 'inaccuracy': 75},
+            'Middlegame': {'blunder': 200, 'mistake': 100, 'inaccuracy': 50},
+            'Endgame': {'blunder': 150, 'mistake': 75, 'inaccuracy': 30},  # More sensitive
+        }
+        return thresholds.get(game_phase, thresholds['Middlegame'])
+
+    def detect_tactical_threats(self, board, prev_eval, curr_eval, move):
+        """
+        Detect tactical patterns that explain why a move is bad.
+
+        Returns: List of threat descriptions
+        """
+        threats = []
+
+        # Check for hanging pieces (piece attacked but undefended)
+        for square in chess.SQUARES:
+            piece = board.piece_at(square)
+            if piece and piece.color == not board.turn:  # Opponent's piece
+                if board.is_attacked_by(board.turn, square):
+                    # Check if defended
+                    defenders = sum(1 for _ in board.attackers(not board.turn, square))
+                    if defenders == 0:
+                        piece_name = chess.piece_name(piece.piece_type)
+                        threats.append(f"Hanging {piece_name}")
+
+        # Check for back rank mate threats
+        enemy_king = board.king(not board.turn)
+        if board.is_check() and len(list(board.legal_moves)) <= 2:
+            threats.append("Allows back rank mate threat")
+
+        # Check for major eval drop (indicates tactic)
+        eval_drop = prev_eval - curr_eval
+        if eval_drop > 300:
+            threats.append("Major tactical blow")
+
+        return threats
     
     def load_pgn_string(self, pgn_string):
         """
@@ -144,13 +215,15 @@ class ChessAnalyzer:
 
         # For the starting position, evaluation is always 0.0
         self.analysis_results.append({
-            'fen': board.fen(), 
+            'fen': board.fen(),
             'eval': 0.0,
             'move_uci': None,
             'move_san': None,
             'delta_eval': None,
             'mistake_category': None,
-            'is_white_move': None
+            'is_white_move': None,
+            'game_phase': self.get_game_phase(board),
+            'tactical_threats': []
         })
 
         # Analyze each subsequent position
@@ -159,8 +232,8 @@ class ChessAnalyzer:
             move_san = board.san(move) if move in board.legal_moves else move.uci()
             
             board.push(move)
-            # Get evaluation and best moves in one analysis to avoid re-analyzing later
-            info = self.engine.analyse(board, chess.engine.Limit(time=self.move_time_ms / 1000.0), multipv=3)
+            # Use depth-based analysis (more consistent than time-based)
+            info = self.engine.analyse(board, chess.engine.Limit(depth=self.depth), multipv=3)
             score = info[0]["score"].white().score(mate_score=10000)
             
             # Extract best moves for this position (to avoid re-analysis in mistake analysis)
@@ -198,31 +271,39 @@ class ChessAnalyzer:
             delta_eval = None
             mistake_category = None
             is_white_move = (i % 2 == 0)  # Even indices (0, 2, 4...) are White's moves
-            
+            game_phase = self.get_game_phase(board)
+            thresholds = self.get_mistake_threshold(game_phase)
+
             if isinstance(prev_eval, (int, float)) and isinstance(score, (int, float)):
                 # Calculate delta for all moves
                 delta_eval = score - prev_eval
-                
-                # Only categorize White's moves (when White's position gets worse)
-                if is_white_move:
-                    # Negative delta means White got worse (from White's perspective)
-                    drop = -delta_eval  # Positive drop means White got worse
-                    if drop > 200:
-                        mistake_category = "Blunder"
-                    elif drop > 100:
-                        mistake_category = "Mistake"
-                    elif drop > 50:
-                        mistake_category = "Inaccuracy"
+
+                # Analyze BOTH colors (not just White)
+                # From the moving player's perspective: negative delta = position got worse
+                drop = -delta_eval if is_white_move else delta_eval
+
+                # Categorize based on game phase thresholds
+                if drop > thresholds['blunder']:
+                    mistake_category = "Blunder"
+                elif drop > thresholds['mistake']:
+                    mistake_category = "Mistake"
+                elif drop > thresholds['inaccuracy']:
+                    mistake_category = "Inaccuracy"
+
+                # Detect tactical threats
+                tactics = self.detect_tactical_threats(board, prev_eval, score, move) if mistake_category else []
             
             self.analysis_results.append({
-                'fen': board.fen(), 
+                'fen': board.fen(),
                 'eval': score if score is not None else "N/A",
                 'move_uci': move.uci(),
                 'move_san': move_san,
                 'delta_eval': delta_eval,
                 'mistake_category': mistake_category,
                 'is_white_move': is_white_move,
-                'best_moves': best_moves_data  # Store to avoid re-analysis
+                'best_moves': best_moves_data,  # Store to avoid re-analysis
+                'game_phase': game_phase,
+                'tactical_threats': tactics if mistake_category else []
             })
             
             # Convert to chess move number for display (position i+1 corresponds to chess move (i+1)/2)

@@ -70,19 +70,19 @@ class MistakeAnalyzer:
         """
         self.engine = engine
     
-    def analyze_position(self, board: chess.Board, time_limit: float = 1.0) -> Dict:
+    def analyze_position(self, board: chess.Board, depth: int = 24) -> Dict:
         """
         Analyze a position and get evaluation and best moves.
-        
+
         Args:
             board: The chess board position
-            time_limit: Time limit for analysis in seconds
-            
+            depth: Analysis depth (default 24 for deeper analysis of mistakes)
+
         Returns:
             Dictionary with 'eval', 'best_moves' (list of top moves), and 'info'
         """
         try:
-            info = self.engine.analyse(board, chess.engine.Limit(time=time_limit), multipv=3)
+            info = self.engine.analyse(board, chess.engine.Limit(depth=depth), multipv=3)
             
             # Get evaluation
             score = info[0]["score"].white().score(mate_score=10000)
@@ -1244,18 +1244,18 @@ class MistakeAnalyzer:
         print(f"[DEBUG] Analyzing mistake: {move.uci()}, eval drop: {(prev_eval - curr_eval)/100:.1f}", flush=True)
         # Use provided best moves if available, otherwise analyze
         if best_moves is None:
-            analysis = self.analyze_position(board, time_limit=1.0)
+            analysis = self.analyze_position(board, depth=24)
             best_moves = analysis.get('best_moves', [])
-        
+
         # Create board after the mistake to analyze what went wrong
         board_after = board.copy()
         board_after.push(move)
-        
+
         # Use continuation_moves if provided, otherwise try to get from analyzing position after
         if continuation_moves is None:
             # Try to analyze position after to get continuation
             try:
-                analysis_after = self.analyze_position(board_after, time_limit=0.5)
+                analysis_after = self.analyze_position(board_after, depth=22)
                 continuation_moves = analysis_after.get('best_moves', [])
             except:
                 continuation_moves = []

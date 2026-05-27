@@ -169,7 +169,7 @@ def _run_analysis_job(job_id: str, pgn_string: str) -> None:
         sys.stdout = _JobLogStream(job_id)  # type: ignore[assignment]
         sys.stderr = _JobLogStream(job_id)  # type: ignore[assignment]
         try:
-            analyzer = ChessAnalyzer(engine_path, move_time_ms=400)
+            analyzer = ChessAnalyzer(engine_path, depth=20)
             analyzer.open_engine()
 
             if not analyzer.load_pgn_string(pgn_string):
