@@ -2,8 +2,8 @@
 
 Two separate implementations so you can develop and deploy independently:
 
-- **`local/`** – Desktop app (Tkinter GUI, matplotlib). Run locally, add features here without touching the web app.
-- **`web/`** – Web app for [Render.com](https://render.com). Self-contained (includes its own copy of the engine). Deploy from this folder or set Render’s root to `web`.
+- **`local/`** – Desktop app (Tkinter GUI, matplotlib). Run locally; add features here without touching the web app.
+- **Root (web app)** – FastAPI web application for chess game analysis and mistake detection. Static files served via GitHub Pages; backend runs on any ASGI host.
 
 ## Local (desktop)
 
@@ -15,32 +15,57 @@ python chess_analyzer.py
 
 Set Stockfish path in `local/chess_analyzer.py` (`STOCKFISH_PATH`) or install Stockfish and put it on `PATH`.
 
-## Web (Render, Docker)
+## Web (FastAPI backend)
 
-The `web/` app can be deployed with **Docker** so Stockfish is included in the image.
+### Prerequisites
 
-**Local run (no Docker):**
+- Python 3.8+
+- Stockfish engine installed and available in `PATH`, or set the `STOCKFISH_PATH` environment variable
+
+### Run locally
+
 ```bash
-cd web
 pip install -r requirements.txt
-uvicorn main:app --host 0.0.0.0 --port 8000
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-**Docker (recommended for Render):**
+Then open http://localhost:8000/ in your browser.
+
+### Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `STOCKFISH_PATH` | `stockfish` | Path to Stockfish executable (must be in PATH if not set) |
+
+## API Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/` | Web UI (single-page app) |
+| `GET` | `/health` | Health check |
+| `POST` | `/api/analyze` | Analyze a game from PGN |
+
+### Example
+
 ```bash
-cd web
-docker build -t chess-coach-web .
-docker run -p 8000:8000 chess-coach-web
+curl -X POST http://localhost:8000/api/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"pgn": "1. e4 e5 2. Nf3 Nc6 3. Bc4 Nf6 4. Ng5 d5..."}'
 ```
 
-On **Render**, use a **Docker** web service:
-- **Root Directory:** `web`
-- **Dockerfile path:** `Dockerfile` (uses `web/Dockerfile`)
-- No Start Command needed; the image runs `uvicorn` with `$PORT`.
-- Stockfish is installed inside the image; you do **not** need to set `STOCKFISH_PATH` unless you override it.
+## Repository layout
 
-## Git layout
+```
+chess_coach/
+├── chess_engine/       # Shared analysis engine (web copy)
+├── static/             # Frontend (index.html, app.js, style.css) – served by GitHub Pages
+├── main.py             # FastAPI application entry point
+├── requirements.txt    # Python dependencies for the web app
+├── local/              # Desktop-only code (Tkinter GUI, matplotlib)
+│   ├── chess_engine/
+│   ├── chess_analyzer.py
+│   └── requirements.txt
+└── CNAME               # GitHub Pages custom domain
+```
 
-- `local/` – local-only code; not required for Render.
-- `web/` – everything needed for Render (FastAPI app, static files, `chess_engine` copy).
-- You can add features in `local/` or `web/` independently; sync `chess_engine` between them when you want to share analyzer changes.
+> **Note:** `local/` and the web app (`chess_engine/`, `main.py`, etc.) maintain independent copies of the engine. Sync `chess_engine/` between them manually when you want to share analyzer changes.
