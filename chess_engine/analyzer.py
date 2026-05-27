@@ -321,9 +321,10 @@ class ChessAnalyzer:
             # Convert to chess move number for display (position i+1 corresponds to chess move (i+1)/2)
             chess_move = (i + 1) / 2.0
             total_moves = len(moves) / 2.0
-            # Print progress (every 5 moves to avoid log spam)
-            if (i + 1) % 10 == 0 or i == len(moves) - 1:  # Print every other move or at end
-                print(f"Analyzed move {chess_move:.1f}/{total_moves:.0f}")
+            player = "White" if (i % 2 == 0) else "Black"
+            # Print progress (every other move to avoid log spam)
+            if (i + 1) % 2 == 0 or i == len(moves) - 1:  # Print every other move or at end
+                print(f"Analyzed move {chess_move:.1f}/{total_moves:.0f}: {player} {move_san}")
 
         print("\nAnalysis complete.")
         return self.analysis_results
