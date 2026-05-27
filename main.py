@@ -21,9 +21,19 @@ import chess.engine
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 app = FastAPI(title="Chess Coach API", version="1.0.0")
+
+# Enable CORS for GitHub Pages
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins (GitHub Pages + localhost)
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Mount static files (HTML, JS, CSS)
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
